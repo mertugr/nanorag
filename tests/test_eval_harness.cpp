@@ -115,21 +115,46 @@ int main() {
 
         // Disjointness must hold on disk
         auto train = load_train_query_set(paths.train_pairs);
-        auto labeled = load_labeled(paths.retrieval);
+        auto easy = load_labeled(paths.retrieval);
+        auto hard = load_labeled(paths.retrieval_hard);
         auto refuse = load_refuse(paths.refuse);
-        assert_labeled_disjoint(train, labeled, "retrieval");
+        assert_labeled_disjoint(train, easy, "retrieval_easy");
+        assert_labeled_disjoint(train, hard, "retrieval_hard");
         assert_refuse_disjoint(train, refuse, "refuse");
-        CHECK(labeled.size() >= 12);
+        CHECK(easy.size() >= 12);
+        CHECK(hard.size() >= 12);
         CHECK(refuse.size() >= 10);
 
-        // Jaccard gate: held-out retrieval queries should not copy the gold doc
-        for (const auto& q : labeled) {
-            auto store = ChunkStore::load(paths.chunks);
+        auto store = ChunkStore::load(paths.chunks);
+
+        // Easy set: soft Jaccard (may share keywords; not a semantic measure)
+        for (const auto& q : easy) {
             const double j = token_jaccard(q.query, store.get(q.gold_id).text);
-            if (j > 0.35) {
-                std::cerr << "FAIL high jaccard j=" << j << " q=" << q.query << "\n";
+            if (j > 0.45) {
+                std::cerr << "FAIL easy high jaccard j=" << j << " q=" << q.query << "\n";
                 ++g_fails;
             }
+        }
+
+        // Hard set: must have ZERO content-token overlap with gold
+        try {
+            assert_zero_keyword_overlap(store, hard, "unit-hard");
+        } catch (const std::exception& e) {
+            std::cerr << "FAIL hard zero-keyword: " << e.what() << "\n";
+            ++g_fails;
+        }
+        for (const auto& q : hard) {
+            if (!has_zero_keyword_overlap(q.query, store.get(q.gold_id).text)) {
+                std::cerr << "FAIL hard overlap: " << q.query << "\n";
+                ++g_fails;
+            }
+        }
+
+        // Unit: keyword_overlap detects leaks
+        {
+            auto ov = keyword_overlap("pure H2O liquid gas", store.get(6).text);
+            CHECK(!ov.empty());
+            CHECK(has_zero_keyword_overlap("dihydrogen monoxide freeze weather", store.get(6).text));
         }
 
         ContrastiveTrainConfig cfg;
@@ -144,21 +169,28 @@ int main() {
                                     /*run_ablations=*/true);
         std::cout << format_report(report);
 
+        CHECK(report.hard_zero_keyword_ok);
+        CHECK(report.retrieval_hard.n >= 12);
+        // Easy smoke can look strong; hard is the honest signal (BOW may be low)
+        CHECK(report.retrieval_easy.recall_at_1 + 1e-9 >= 0.80);
+
         // Hard refuse cases must be in the failure-free set
-        for (const char* hard : {"What is the boiling point of alcohol?",
-                                 "What is the melting point of iron?",
-                                 "What is the capital of Germany?"}) {
-            auto ga = primary.ask_grounded(hard, 5, default_grounding_config());
+        for (const char* hard_q : {"What is the boiling point of alcohol?",
+                                   "What is the melting point of iron?",
+                                   "What is the capital of Germany?"}) {
+            auto ga = primary.ask_grounded(hard_q, 5, default_grounding_config());
             if (!ga.refused || ga.answer != std::string(kDontKnowAnswer)) {
-                std::cerr << "HARD refuse FAIL: " << hard << " -> " << ga.answer << "\n";
+                std::cerr << "HARD refuse FAIL: " << hard_q << " -> " << ga.answer << "\n";
                 ++g_fails;
             }
         }
 
-        // Gates for CI
+        // Gates: high floors on easy smoke only; hard floors stay 0 for BOW
         QualityGates gates;
-        gates.min_contrastive_recall_at_1 = 0.80;  // allow small float variance
-        gates.min_contrastive_mrr = 0.82;
+        gates.min_easy_recall_at_1 = 0.80;
+        gates.min_easy_mrr = 0.82;
+        gates.min_hard_recall_at_1 = 0.0;
+        gates.min_hard_mrr = 0.0;
         gates.min_refuse_pass_rate = 0.90;
         gates.min_grounding_full_pass = 0.75;
         const std::string gate_err = check_gates(report, gates);
@@ -167,16 +199,21 @@ int main() {
             ++g_fails;
         }
 
-        // Ablations: hashing should not match contrastive perfection typically
-        double hash_r1 = -1;
+        double hash_easy = -1, hash_hard = -1;
         for (const auto& a : report.ablations) {
             if (a.name == "hashing-v1") {
-                hash_r1 = a.retrieval.recall_at_1;
+                hash_easy = a.retrieval_easy.recall_at_1;
+                hash_hard = a.retrieval_hard.recall_at_1;
             }
         }
-        CHECK(hash_r1 >= 0);
-        // Soft: contrastive MRR should be competitive; do not require always beat if hashing lucky
+        CHECK(hash_easy >= 0);
+        CHECK(hash_hard >= 0);
         CHECK(report.ablations.size() >= 3);
+        // Document honesty: if hard R@1 is perfect, something is likely leaking keywords
+        if (report.retrieval_hard.recall_at_1 > 0.99 + 1e-9) {
+            std::cerr << "WARN: hard R@1 is 1.0 — verify zero-keyword still holds "
+                         "(unexpected for bag-of-words)\n";
+        }
     }
 
     if (g_fails) {

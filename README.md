@@ -145,7 +145,8 @@ data/demo/
   chunks.tsv              # neutral passages (not query-shaped answers)
   train_pairs.tsv         # TRAIN ONLY paraphrase_query \t positive_id
   eval/
-    retrieval.tsv         # held-out labels for R@k / MRR / grounding
+    retrieval.tsv         # easy held-out (may share keywords) — smoke
+    retrieval_hard.tsv    # hard: zero content-token overlap with gold
     refuse.tsv            # must answer exactly "I don't know"
     README.md             # format + disjointness rule
   eval_paraphrase.tsv     # deprecated thin pointer → eval/
@@ -162,10 +163,14 @@ Labeled sets live under `data/demo/eval/` and **must not overlap** train queries
 
 | Metric | Set | Meaning |
 |--------|-----|---------|
-| R@1 / R@3 / R@5, MRR | `eval/retrieval.tsv` | Gold id in ranked real docs |
+| R@k / MRR **easy** | `eval/retrieval.tsv` | May share gold keywords — **smoke only** |
+| R@k / MRR **hard** | `eval/retrieval_hard.tsv` | **Zero** content-token overlap with gold — honest retrieval |
 | Refuse pass rate | `eval/refuse.tsv` | Exact `I don't know`, empty context |
-| Grounding full pass | retrieval labels | Answer + valid cites + gold cited |
-| Ablations | same retrieval | hashing / word2vec / contrastive |
+| Grounding full pass | easy retrieval labels | Answer + valid cites + gold cited |
+| Ablations | easy + hard | hashing / word2vec / contrastive |
+
+> Easy R@1≈1 is **not** dual-encoder quality. Report **hard** R@k/MRR for retrieval truth.
+> Bag-of-words contrastive-v1 is expected to be weak on hard until stronger embedders.
 
 ```bash
 # Full suite (also runs via ctest: nanorag_eval_harness)

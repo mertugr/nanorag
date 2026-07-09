@@ -2,6 +2,11 @@
 
 // Phase 2 evaluation foundation: labeled sets, metrics, ablations.
 // Eval queries must be disjoint from training pairs (enforced by assert_disjoint).
+//
+// Retrieval is reported on two held-out splits:
+//   - easy (retrieval.tsv): paraphrases may share gold keywords — smoke / lexical path
+//   - hard (retrieval_hard.tsv): ZERO content-token overlap with gold — honest semantic R@k/MRR
+// Easy R@1≈1 does not measure dual-encoder quality; hard does (and may be low for BOW).
 
 #include "nanorag/chunk_store.hpp"
 #include "nanorag/contrastive.hpp"
@@ -170,6 +175,53 @@ inline void assert_refuse_disjoint(const std::unordered_set<std::string>& train,
         qs.push_back(q.query);
     }
     assert_disjoint(train, qs, name);
+}
+
+/// Content tokens shared by query and gold passage (same filter as answerability).
+inline std::vector<std::string> keyword_overlap(const std::string& query,
+                                                const std::string& passage) {
+    const auto q = content_tokens(query);
+    const auto p = content_tokens(passage);
+    std::unordered_set<std::string> pset(p.begin(), p.end());
+    std::vector<std::string> inter;
+    std::unordered_set<std::string> seen;
+    for (const auto& t : q) {
+        if (pset.count(t) && seen.insert(t).second) {
+            inter.push_back(t);
+        }
+    }
+    return inter;
+}
+
+inline bool has_zero_keyword_overlap(const std::string& query, const std::string& passage) {
+    return keyword_overlap(query, passage).empty();
+}
+
+/// Fail unless every labeled query has zero content-token overlap with its gold chunk.
+inline void assert_zero_keyword_overlap(const ChunkStore& store,
+                                        const std::vector<LabeledQuery>& labeled,
+                                        const std::string& name) {
+    std::ostringstream oss;
+    int bad = 0;
+    for (const auto& q : labeled) {
+        const auto& gold = store.get(q.gold_id);
+        auto ov = keyword_overlap(q.query, gold.text);
+        if (!ov.empty()) {
+            ++bad;
+            oss << "  - id=" << q.gold_id << " overlap={";
+            for (std::size_t i = 0; i < ov.size(); ++i) {
+                if (i) {
+                    oss << ",";
+                }
+                oss << ov[i];
+            }
+            oss << "} | " << q.query << "\n";
+        }
+    }
+    if (bad) {
+        throw std::runtime_error(name + ": " + std::to_string(bad) +
+                                 " queries share content tokens with gold:\n" + oss.str());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -363,21 +415,27 @@ inline GroundingMetrics eval_grounding(const Retriever& ret,
 
 struct AblationRow {
     std::string name;
-    RetrievalMetrics retrieval;
+    RetrievalMetrics retrieval_easy;
+    RetrievalMetrics retrieval_hard;
 };
 
 struct EvalReport {
-    RetrievalMetrics retrieval;
+    /// Lexical-friendly held-out paraphrases (may share gold keywords). Smoke only.
+    RetrievalMetrics retrieval_easy;
+    /// Zero content-token overlap with gold — honest semantic retrieval measure.
+    RetrievalMetrics retrieval_hard;
     RefuseMetrics refuse;
     GroundingMetrics grounding;
     std::vector<AblationRow> ablations;
     bool disjoint_ok = false;
+    bool hard_zero_keyword_ok = false;
 };
 
 struct EvalPaths {
     std::string chunks;
     std::string train_pairs;
-    std::string retrieval;
+    std::string retrieval;       // easy
+    std::string retrieval_hard;  // zero keyword overlap
     std::string refuse;
 };
 
@@ -387,6 +445,7 @@ inline EvalPaths default_demo_paths(const std::string& root) {
     p.chunks = root + "/chunks.tsv";
     p.train_pairs = root + "/train_pairs.tsv";
     p.retrieval = root + "/eval/retrieval.tsv";
+    p.retrieval_hard = root + "/eval/retrieval_hard.tsv";
     p.refuse = root + "/eval/refuse.tsv";
     return p;
 }
@@ -407,26 +466,46 @@ inline EvalReport run_full_eval(const Retriever& primary, const EvalPaths& paths
                                 const GroundingConfig& gcfg = default_grounding_config(),
                                 bool run_ablations = true) {
     auto train = load_train_query_set(paths.train_pairs);
-    auto labeled = load_labeled(paths.retrieval);
+    auto easy = load_labeled(paths.retrieval);
+    auto hard = load_labeled(paths.retrieval_hard);
     auto refuse = load_refuse(paths.refuse);
-    assert_labeled_disjoint(train, labeled, "retrieval");
+    assert_labeled_disjoint(train, easy, "retrieval_easy");
+    assert_labeled_disjoint(train, hard, "retrieval_hard");
     assert_refuse_disjoint(train, refuse, "refuse");
+    // Hard must also be disjoint from easy query strings (no double-counting).
+    {
+        std::unordered_set<std::string> easy_set;
+        for (const auto& q : easy) {
+            easy_set.insert(normalize_query(q.query));
+        }
+        std::vector<std::string> hard_qs;
+        for (const auto& q : hard) {
+            hard_qs.push_back(q.query);
+        }
+        assert_disjoint(easy_set, hard_qs, "retrieval_hard vs retrieval_easy");
+    }
+
+    auto store = ChunkStore::load(paths.chunks);
+    assert_zero_keyword_overlap(store, hard, "retrieval_hard");
 
     EvalReport rep;
     rep.disjoint_ok = true;
-    rep.retrieval = eval_retrieval(primary, labeled, 5);
+    rep.hard_zero_keyword_ok = true;
+    rep.retrieval_easy = eval_retrieval(primary, easy, 5);
+    rep.retrieval_hard = eval_retrieval(primary, hard, 5);
     rep.refuse = eval_refuse(primary, refuse, gcfg);
-    rep.grounding = eval_grounding(primary, labeled, gcfg);
+    // Grounding uses easy set (lexical support path); hard is retrieval-only for now.
+    rep.grounding = eval_grounding(primary, easy, gcfg);
 
     if (run_ablations) {
-        auto store = ChunkStore::load(paths.chunks);
         // Hashing
         {
             auto emb = std::make_shared<HashingEmbedder>(128);
             auto ret = Retriever::build(emb, store);
             AblationRow row;
             row.name = "hashing-v1";
-            row.retrieval = eval_retrieval(ret, labeled, 5);
+            row.retrieval_easy = eval_retrieval(ret, easy, 5);
+            row.retrieval_hard = eval_retrieval(ret, hard, 5);
             rep.ablations.push_back(std::move(row));
         }
         // Word2Vec
@@ -439,14 +518,16 @@ inline EvalReport run_full_eval(const Retriever& primary, const EvalPaths& paths
             auto ret = Retriever::build_word2vec(store, wcfg);
             AblationRow row;
             row.name = "word2vec-v1";
-            row.retrieval = eval_retrieval(ret, labeled, 5);
+            row.retrieval_easy = eval_retrieval(ret, easy, 5);
+            row.retrieval_hard = eval_retrieval(ret, hard, 5);
             rep.ablations.push_back(std::move(row));
         }
         // Contrastive row (primary expected to be contrastive)
         {
             AblationRow row;
             row.name = "contrastive-v1";
-            row.retrieval = rep.retrieval;
+            row.retrieval_easy = rep.retrieval_easy;
+            row.retrieval_hard = rep.retrieval_hard;
             rep.ablations.push_back(std::move(row));
         }
     }
@@ -456,12 +537,20 @@ inline EvalReport run_full_eval(const Retriever& primary, const EvalPaths& paths
 inline std::string format_report(const EvalReport& r) {
     std::ostringstream oss;
     oss << "=== nanorag eval report ===\n";
-    oss << "disjoint_ok=" << (r.disjoint_ok ? "true" : "false") << "\n";
-    oss << "[retrieval] n=" << r.retrieval.n
-        << " R@1=" << r.retrieval.recall_at_1
-        << " R@3=" << r.retrieval.recall_at_3
-        << " R@5=" << r.retrieval.recall_at_5
-        << " MRR=" << r.retrieval.mrr << "\n";
+    oss << "disjoint_ok=" << (r.disjoint_ok ? "true" : "false")
+        << " hard_zero_keyword_ok=" << (r.hard_zero_keyword_ok ? "true" : "false") << "\n";
+    oss << "[retrieval_easy] n=" << r.retrieval_easy.n
+        << " R@1=" << r.retrieval_easy.recall_at_1
+        << " R@3=" << r.retrieval_easy.recall_at_3
+        << " R@5=" << r.retrieval_easy.recall_at_5
+        << " MRR=" << r.retrieval_easy.mrr
+        << "  # may share gold keywords — NOT semantic quality\n";
+    oss << "[retrieval_hard] n=" << r.retrieval_hard.n
+        << " R@1=" << r.retrieval_hard.recall_at_1
+        << " R@3=" << r.retrieval_hard.recall_at_3
+        << " R@5=" << r.retrieval_hard.recall_at_5
+        << " MRR=" << r.retrieval_hard.mrr
+        << "  # zero content-token overlap with gold — honest R@k/MRR\n";
     oss << "[refuse] n=" << r.refuse.n
         << " idk_rate=" << r.refuse.idk_rate
         << " empty_used=" << r.refuse.empty_used_rate
@@ -477,7 +566,8 @@ inline std::string format_report(const EvalReport& r) {
         << " full_pass=" << r.grounding.full_pass_rate
         << " gold_cited|ans=" << r.grounding.gold_cited_rate
         << " validator_ok|ans=" << r.grounding.validator_ok_rate
-        << " illegal|ans=" << r.grounding.illegal_cite_rate << "\n";
+        << " illegal|ans=" << r.grounding.illegal_cite_rate
+        << "  # on retrieval_easy labels\n";
     if (!r.grounding.failures.empty()) {
         oss << "  grounding failures (" << r.grounding.failures.size() << "):\n";
         for (std::size_t i = 0; i < std::min<std::size_t>(5, r.grounding.failures.size()); ++i) {
@@ -485,25 +575,32 @@ inline std::string format_report(const EvalReport& r) {
         }
     }
     if (!r.ablations.empty()) {
-        oss << "[ablations]\n";
+        oss << "[ablations] easy_R@1 / hard_R@1 / hard_MRR\n";
         for (const auto& a : r.ablations) {
             oss << "  " << a.name
-                << " R@1=" << a.retrieval.recall_at_1
-                << " R@5=" << a.retrieval.recall_at_5
-                << " MRR=" << a.retrieval.mrr << "\n";
+                << " easy_R@1=" << a.retrieval_easy.recall_at_1
+                << " hard_R@1=" << a.retrieval_hard.recall_at_1
+                << " hard_R@5=" << a.retrieval_hard.recall_at_5
+                << " hard_MRR=" << a.retrieval_hard.mrr << "\n";
         }
     }
     return oss.str();
 }
 
-/// Gates for automated tests / CI (adjust as quality improves).
+/// Gates for automated tests / CI.
+/// High R@k floors apply only to retrieval_easy (lexical smoke).
+/// Hard metrics are reported for honesty; optional floors default to 0 (BOW may fail hard).
 struct QualityGates {
-    double min_contrastive_recall_at_1 = 0.85;
-    double min_contrastive_mrr = 0.88;
+    double min_easy_recall_at_1 = 0.85;
+    double min_easy_mrr = 0.88;
+    /// Honest semantic split — leave 0 until embedders improve; still reported.
+    double min_hard_recall_at_1 = 0.0;
+    double min_hard_mrr = 0.0;
     double min_refuse_pass_rate = 0.95;
     double min_grounding_full_pass = 0.85;
-    /// Ablations should not dominate contrastive on R@1 by this margin (soft).
-    bool require_contrastive_beats_hashing = true;
+    bool require_hard_zero_keyword = true;
+    /// On easy set only (hashing is competitive when keywords leak).
+    bool require_contrastive_beats_hashing_easy = true;
 };
 
 inline std::string check_gates(const EvalReport& r, const QualityGates& g = {}) {
@@ -516,12 +613,27 @@ inline std::string check_gates(const EvalReport& r, const QualityGates& g = {}) 
     if (!r.disjoint_ok) {
         fail("train/eval not disjoint");
     }
-    if (r.retrieval.recall_at_1 + 1e-9 < g.min_contrastive_recall_at_1) {
-        fail("R@1 " + std::to_string(r.retrieval.recall_at_1) + " < " +
-             std::to_string(g.min_contrastive_recall_at_1));
+    if (g.require_hard_zero_keyword && !r.hard_zero_keyword_ok) {
+        fail("retrieval_hard must have zero content-token overlap with gold");
     }
-    if (r.retrieval.mrr + 1e-9 < g.min_contrastive_mrr) {
-        fail("MRR " + std::to_string(r.retrieval.mrr) + " < " + std::to_string(g.min_contrastive_mrr));
+    if (r.retrieval_hard.n <= 0) {
+        fail("retrieval_hard set is empty");
+    }
+    if (r.retrieval_easy.recall_at_1 + 1e-9 < g.min_easy_recall_at_1) {
+        fail("easy R@1 " + std::to_string(r.retrieval_easy.recall_at_1) + " < " +
+             std::to_string(g.min_easy_recall_at_1));
+    }
+    if (r.retrieval_easy.mrr + 1e-9 < g.min_easy_mrr) {
+        fail("easy MRR " + std::to_string(r.retrieval_easy.mrr) + " < " +
+             std::to_string(g.min_easy_mrr));
+    }
+    if (r.retrieval_hard.recall_at_1 + 1e-9 < g.min_hard_recall_at_1) {
+        fail("hard R@1 " + std::to_string(r.retrieval_hard.recall_at_1) + " < " +
+             std::to_string(g.min_hard_recall_at_1));
+    }
+    if (r.retrieval_hard.mrr + 1e-9 < g.min_hard_mrr) {
+        fail("hard MRR " + std::to_string(r.retrieval_hard.mrr) + " < " +
+             std::to_string(g.min_hard_mrr));
     }
     if (r.refuse.pass_rate + 1e-9 < g.min_refuse_pass_rate) {
         fail("refuse pass_rate " + std::to_string(r.refuse.pass_rate) + " < " +
@@ -531,16 +643,16 @@ inline std::string check_gates(const EvalReport& r, const QualityGates& g = {}) 
         fail("grounding full_pass " + std::to_string(r.grounding.full_pass_rate) + " < " +
              std::to_string(g.min_grounding_full_pass));
     }
-    if (g.require_contrastive_beats_hashing) {
+    if (g.require_contrastive_beats_hashing_easy) {
         double h_r1 = -1;
-        double c_r1 = r.retrieval.recall_at_1;
+        double c_r1 = r.retrieval_easy.recall_at_1;
         for (const auto& a : r.ablations) {
             if (a.name == "hashing-v1") {
-                h_r1 = a.retrieval.recall_at_1;
+                h_r1 = a.retrieval_easy.recall_at_1;
             }
         }
         if (h_r1 >= 0 && c_r1 + 1e-9 < h_r1) {
-            fail("contrastive R@1 should be >= hashing R@1");
+            fail("contrastive easy R@1 should be >= hashing easy R@1");
         }
     }
     if (fails == 0) {

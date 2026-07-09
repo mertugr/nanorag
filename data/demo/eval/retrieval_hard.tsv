@@ -1,0 +1,23 @@
+# HARD retrieval: query <TAB> gold_chunk_id
+# Zero content-token overlap with gold passage (after simple_tokenize + stop filter).
+# Must be disjoint from train_pairs.tsv and from eval/retrieval.tsv (normalized).
+# Bag-of-words embedders are expected to score poorly here — this is the honest
+# semantic retrieval split (not the lexical-friendly easy set).
+What feline housemate rumbles softly when pleased?	0
+Which pet species purrs after a meal beside its owner?	0
+Which pet enjoys fetch games and strolls with its owner?	1
+What loyal companion wags and chases thrown toys?	1
+Which egg-laying creatures often perch high among branches?	2
+Name warm-blooded flyers that sing near dawn.	2
+What owned toolkit finds close vectors without leaving the process?	3
+Which pure Cplusplus package ranks similar items via layered meshes?	3
+What stack executes chat models entirely offline on ordinary hardware?	4
+Which from-scratch engine streams replies from proprietary weight files?	4
+What product stitches lookup to an offline generator for grounded QA?	5
+What app stitches doc search into offline chat for cited answers?	5
+When does plain drinking fluid freeze under everyday weather?	6
+At everyday air density, when does clear dihydrogen monoxide boil?	6
+How long is a calendar year for our home world roughly?	7
+What rocky companion circles the world we live on?	7
+What multilayer topology speeds nearby-item lookup in dense feature spaces?	8
+What structure finds similar points faster by spending extra RAM?	8
