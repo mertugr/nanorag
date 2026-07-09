@@ -10,7 +10,7 @@ Local **C++17 RAG** orchestrator over owned libraries:
 
 No Hugging Face or third-party ML runtimes on the default path.
 
-**Status:** Phase 0 sealed (scaffold + contrastive embed + grounding). Phase 1 = packaging/install/CI. Not yet a production dual-encoder product, but the architecture is meant to grow there without demo shortcuts.
+**Status:** Phase 0 sealed. **Phase 1 packaging** — hybrid submodules (default) + install/export + CI. Not yet a production dual-encoder product.
 
 ---
 
@@ -61,17 +61,37 @@ Extractive mode is **evidence quoting**, not abstractive QA. Free-form generatio
 
 ---
 
-## Build
+## Build (submodules — default / development)
 
 ```bash
 git clone --recurse-submodules https://github.com/mertugr/nanorag.git
 cd nanorag
 # nanollm is private — auth required for that submodule
 
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNANORAG_USE_SUBMODULES=ON
 cmake --build build -j
 ctest --test-dir build --output-on-failure
+./build/nanorag smoke
 ```
+
+### Install to a prefix (self-contained from submodules)
+
+```bash
+cmake --install build --prefix $HOME/nanorag-prefix
+# bins:  $HOME/nanorag-prefix/bin/nanorag
+# cmake: $HOME/nanorag-prefix/lib/cmake/{nanorag,tinyann,nanollm}
+# headers under include/
+```
+
+### Optional: find_package path
+
+Build and install **tinyann** / **nanollm** first (or use the prefix above), then:
+
+```bash
+cmake -S . -B build-pkg   -DNANORAG_USE_SUBMODULES=OFF   -DCMAKE_PREFIX_PATH=$HOME/nanorag-prefix
+```
+
+See [COMPATIBILITY.md](COMPATIBILITY.md) for version matrix and format versions.
 
 ---
 
@@ -149,9 +169,10 @@ data/demo/
 ## Roadmap
 
 1. **Phase 0** — scaffold + contrastive + grounding (**sealed**)
-2. **Phase 1** — install/export, CI, versioning
+2. **Phase 1** — hybrid submodules + install/export, CI, VERSION, LICENSE (**this**)
 3. **Phase 2+** — stronger embedders, hybrid lexical+dense, production packaging
 
 ## License
 
-TBD
+MIT for **nanorag** sources — see [LICENSE](LICENSE).  
+Submodules: **tinyann** (MIT); **nanollm** (see that repo; may still be TBD).

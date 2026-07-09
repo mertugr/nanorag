@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main, phase1/**, phase0/**]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (recursive submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Private nanollm submodule needs a token with repo scope when CI runs
+          # as a fork or without default GITHUB_TOKEN access to private deps.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DNANORAG_USE_SUBMODULES=ON \
+            -DNANORAG_BUILD_TESTS=ON \
+            -DNANORAG_BUILD_CLI=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Smoke CLI
+        run: ./build/nanorag smoke
+
+      - name: Install prefix smoke
+        run: |
+          cmake --install build --prefix "$HOME/nanorag-prefix"
+          test -x "$HOME/nanorag-prefix/bin/nanorag"
+          test -d "$HOME/nanorag-prefix/include/nanorag"
+          test -d "$HOME/nanorag-prefix/include/tinyann"
+          test -d "$HOME/nanorag-prefix/include/nanollm"
