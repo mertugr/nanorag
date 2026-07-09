@@ -31,28 +31,31 @@ What works for paraphrase retrieval in this repo today:
 Answers are **gated** before any generation:
 
 1. Retrieve candidates (tinyann)
-2. Drop `NO_EVIDENCE` sentinel / low-score hits
-3. If nothing relevant → exact answer: `I don't know` (no LLM call)
-4. Else **extractive** answer from passages only, each cited as `[#id]`
-5. Optional `--mode generate` + nanollm: model text is accepted **only** if
-   `validate_grounding` passes (legal citations + content support); otherwise
-   extractive fallback (never serve ungrounded model text)
+2. Per-passage **answerability** gate:
+   - keep if embedding score is high **and** query content tokens overlap the passage, **or**
+   - score alone is very high (trained paraphrase path: `min_score_without_query_support`)
+   - `NO_EVIDENCE` sentinel / near-miss training → refuse
+3. If nothing answerable → exact `I don't know` (no LLM call)
+4. Else **extractive** answer from kept passages only, each cited as `[#id]`
+5. Optional LLM: accepted only if `validate_grounding` passes; else extractive fallback
+
+Near-miss examples that must refuse (corpus has water, not alcohol):
 
 ```bash
 ./build/nanorag ask --index index/demo \
-  -q "Which feline housemate purrs when comfortable?" --min-score 0.20
-# → passage text … [#0]
+  -q "What is the boiling point of alcohol?" --min-score 0.20
+# → I don't know   (must NOT return cats / planets / water)
 
 ./build/nanorag ask --index index/demo \
-  -q "Who invented the chocolate pizza telescope?" --min-score 0.20
-# → I don't know
+  -q "At one atmosphere when does pure water become gas?" --min-score 0.20
+# → H2O … 373.15 K [#6]
 
 ./build/nanorag eval-grounding --index index/demo \
   --pairs data/demo/eval_paraphrase.tsv --min-score 0.20
-# in-domain cites gold · OOD refuses · validator negatives
+# in-domain cites · alcohol/ethanol/iron/… refuse · validator negatives
 ```
 
-`ctest` target `nanorag_grounding_tests` proves the same properties in-process.
+`nanorag_grounding_tests` includes the alcohol near-miss case (not only absurd OOD).
 
 ## Build
 

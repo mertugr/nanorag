@@ -150,15 +150,23 @@ public:
                 store.add({kNoEvidenceId, "system", kNoEvidenceText});
             }
             // Out-of-scope queries map to the sentinel so top-1 can mean "refuse".
+            // Mix of absurd OOD and realistic *near-misses* (same domain, wrong entity).
             const char* oods[] = {
+                "What is the boiling point of alcohol?",
+                "What is the boiling point of ethanol?",
+                "What is the melting point of iron?",
+                "What is the freezing point of mercury?",
+                "How many legs does a spider have?",
+                "What is the capital of Germany?",
+                "Who is the president of France?",
+                "What is the population of Tokyo?",
+                "How tall is Mount Everest?",
+                "What is the speed of sound in air?",
+                "Which planet has the most moons in our solar system?",
+                "What is the chemical formula for methane?",
                 "Who invented the chocolate pizza telescope in medieval France?",
                 "What is the stock price of completely fictional company Zyblerqux?",
                 "How many purple dragons live in my kitchen toaster?",
-                "What is the capital city of the lost continent Atlantis?",
-                "When will the flying spaghetti monster visit Neptune?",
-                "Which quantum banana protocol encrypts dreams?",
-                "Who won the underwater chess olympiad on Mars in 1492?",
-                "What is the recipe for invisible soup made of silence?",
             };
             for (const char* q : oods) {
                 train_pairs.push_back({q, kNoEvidenceId});

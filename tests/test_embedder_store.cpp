@@ -106,7 +106,9 @@ int main() {
         cfg.lr = 0.08f;
         cfg.temperature = 0.07f;
         cfg.seed = 99;
-        auto ret = nanorag::Retriever::build_contrastive(store, train, cfg);
+        // No NO_EVIDENCE injection: this suite measures paraphrase retrieval only.
+        auto ret = nanorag::Retriever::build_contrastive(store, train, cfg, {},
+                                                         /*inject_no_evidence=*/false);
         CHECK(ret.embedder().id() == std::string(nanorag::kContrastiveEmbedderId));
 
         int hits = 0;

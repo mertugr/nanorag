@@ -4,10 +4,14 @@
 //
 // Policy:
 //   1) Retrieve k candidates (scores = query–doc similarity)
-//   2) Keep hits that pass the relevance gate (score + shuffle baseline)
+//   2) Keep hits that pass answerability gate (score AND query↔passage support,
+//      or very high score alone for trained paraphrases; NO_EVIDENCE → refuse)
 //   3) If none remain → answer exactly "I don't know" (no generation)
 //   4) Otherwise answer only from those passages and cite [#id]
-//   5) validate_grounding() proves citations + lexical support from context
+//   5) validate_grounding() proves citations + answer tokens ⊆ context
+//
+// Near-miss queries ("boiling point of alcohol" when corpus only has water) must
+// refuse — not dump unrelated high-scoring passages (cats, planets, …).
 
 #include "nanorag/embedder.hpp"
 #include "nanorag/prompt.hpp"
@@ -36,10 +40,15 @@ inline constexpr const char* kNoEvidenceText =
 struct GroundingConfig {
     /// Absolute minimum retrieval score (cosine-like).
     float min_score = 0.25f;
-    /// Require score(query,doc) - score(shuffle(query),doc) >= margin (spurious match filter).
-    float min_score_margin = 0.05f;
-    bool use_shuffle_baseline = true;
-    std::uint32_t shuffle_seed = 0xBEE5u;
+    /// If query has little lexical overlap with a passage, require this higher score
+    /// (trained paraphrases can clear it; weak spurious matches cannot).
+    float min_score_without_query_support = 0.55f;
+    /// Min fraction of query *content* tokens that must appear in the passage
+    /// (after light stemming) to count as lexical support.
+    float min_query_support = 0.20f;
+    /// At least this many query content tokens must hit the passage when using
+    /// the lexical path (guards short accidental overlaps).
+    int min_query_support_hits = 1;
     std::size_t max_context_chunks = 3;
     bool require_citations = true;
     /// Min fraction of answer content tokens that must appear in context (0–1).
@@ -129,58 +138,94 @@ inline bool is_no_evidence_chunk(const RetrievedChunk& h) {
     return h.id == kNoEvidenceId;
 }
 
-/// True if retrieval indicates no answer: NO_EVIDENCE is ranked first and no
-/// real passage clears min_score.
-inline bool should_refuse_no_evidence(const std::vector<RetrievedChunk>& hits, float min_score) {
-    if (hits.empty() || !is_no_evidence_chunk(hits.front())) {
-        return false;
-    }
-    for (std::size_t i = 1; i < hits.size(); ++i) {
-        if (!is_no_evidence_chunk(hits[i]) && hits[i].score >= min_score) {
-            return false;  // a real passage still clears the bar
-        }
-    }
-    return true;
+inline bool is_stop_token(const std::string& t) {
+    static const std::unordered_set<std::string> stop = {
+        "a", "an", "the", "is", "are", "was", "were", "be", "been", "to", "of", "in", "on",
+        "for", "and", "or", "as", "by", "with", "from", "that", "this", "it", "its", "at",
+        "do", "does", "did", "not", "no", "yes", "what", "which", "who", "whom", "whose",
+        "when", "where", "why", "how", "many", "much", "can", "could", "would", "should",
+        "will", "may", "might", "than", "then", "into", "about", "over", "under", "between",
+        "my", "your", "our", "their", "his", "her", "there", "here", "has", "have", "had",
+        "point",  // generic in "boiling point" without the substance word
+    };
+    return stop.count(t) != 0 || t.size() <= 1;
 }
 
-inline std::vector<RetrievedChunk> filter_relevant_by_score(const std::vector<RetrievedChunk>& hits,
-                                                            float min_score, std::size_t max_n) {
-    if (should_refuse_no_evidence(hits, min_score)) {
-        return {};
-    }
-    std::vector<RetrievedChunk> out;
-    for (const auto& h : hits) {
-        if (is_no_evidence_chunk(h)) {
-            continue;
-        }
-        if (h.score >= min_score) {
-            out.push_back(h);
-            if (out.size() >= max_n) {
-                break;
-            }
+inline std::vector<std::string> content_tokens(const std::string& text) {
+    std::vector<std::string> out;
+    for (const auto& tok : detail::simple_tokenize(text)) {
+        if (!is_stop_token(tok)) {
+            out.push_back(tok);
         }
     }
     return out;
 }
 
-/// Full relevance gate: min score + optional shuffle baseline (needs embedder).
+/// Fraction of query content tokens found in `passage`.
+inline double query_support_in_passage(const std::string& query, const std::string& passage,
+                                       int* hits_out = nullptr) {
+    auto q = content_tokens(query);
+    if (q.empty()) {
+        if (hits_out) {
+            *hits_out = 0;
+        }
+        return 0.0;
+    }
+    auto ptoks = content_tokens(passage);
+    std::unordered_set<std::string> pset(ptoks.begin(), ptoks.end());
+    int hits = 0;
+    for (const auto& tok : q) {
+        if (pset.count(tok)) {
+            ++hits;
+        }
+    }
+    if (hits_out) {
+        *hits_out = hits;
+    }
+    return static_cast<double>(hits) / static_cast<double>(q.size());
+}
+
+/// Per-passage answerability (blocks near-misses like alcohol→water/cats).
+inline bool passage_is_answerable(const std::string& query, const RetrievedChunk& h,
+                                  const GroundingConfig& cfg) {
+    if (is_no_evidence_chunk(h)) {
+        return false;
+    }
+    if (h.score < cfg.min_score) {
+        return false;
+    }
+    int hits = 0;
+    const double qsup = query_support_in_passage(query, h.text, &hits);
+    if (hits >= cfg.min_query_support_hits && qsup + 1e-12 >= cfg.min_query_support) {
+        return true;
+    }
+    return h.score >= cfg.min_score_without_query_support;
+}
+
+/// Refuse when NO_EVIDENCE is top and no real answerable passage exists.
+inline bool should_refuse_no_evidence(const std::vector<RetrievedChunk>& hits,
+                                      const std::string& query, const GroundingConfig& cfg) {
+    if (hits.empty() || !is_no_evidence_chunk(hits.front())) {
+        return false;
+    }
+    for (std::size_t i = 1; i < hits.size(); ++i) {
+        if (passage_is_answerable(query, hits[i], cfg)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 inline std::vector<RetrievedChunk> filter_relevant(const std::vector<RetrievedChunk>& hits,
                                                    const std::string& query,
-                                                   const Embedder* embedder,
+                                                   const Embedder* /*embedder*/,
                                                    const GroundingConfig& cfg) {
-    (void)query;
-    (void)embedder;
-    // OOD: trained NO_EVIDENCE sentinel (id=-1). Only refuse when it wins and no
-    // real passage clears min_score (bag-of-words cannot use order baselines).
-    if (should_refuse_no_evidence(hits, cfg.min_score)) {
+    if (should_refuse_no_evidence(hits, query, cfg)) {
         return {};
     }
     std::vector<RetrievedChunk> out;
     for (const auto& h : hits) {
-        if (is_no_evidence_chunk(h)) {
-            continue;
-        }
-        if (h.score < cfg.min_score) {
+        if (!passage_is_answerable(query, h, cfg)) {
             continue;
         }
         out.push_back(h);
@@ -189,6 +234,13 @@ inline std::vector<RetrievedChunk> filter_relevant(const std::vector<RetrievedCh
         }
     }
     return out;
+}
+
+/// Score+answerability without embedder (same gates; query required).
+inline std::vector<RetrievedChunk> filter_relevant_by_score(const std::vector<RetrievedChunk>& hits,
+                                                            const std::string& query,
+                                                            const GroundingConfig& cfg) {
+    return filter_relevant(hits, query, nullptr, cfg);
 }
 
 inline std::vector<std::int64_t> extract_citation_ids(const std::string& answer) {
@@ -384,15 +436,14 @@ inline GroundedAnswer make_answer_from_used(const std::string& question,
     return ga;
 }
 
-/// Score-only path (tests / no embedder).
+/// Answerability path (query required for near-miss rejection).
 inline GroundedAnswer answer_extractive_for_query(const std::string& question,
                                                   const std::vector<RetrievedChunk>& candidates,
                                                   const GroundingConfig& cfg = {}) {
-    auto used = filter_relevant_by_score(candidates, cfg.min_score, cfg.max_context_chunks);
+    auto used = filter_relevant(candidates, question, nullptr, cfg);
     return make_answer_from_used(question, candidates, std::move(used), cfg);
 }
 
-/// Preferred path with embedder for shuffle-baseline relevance.
 inline GroundedAnswer answer_extractive_for_query(const std::string& question,
                                                   const std::vector<RetrievedChunk>& candidates,
                                                   const Embedder& embedder,
@@ -406,9 +457,7 @@ inline GroundedAnswer finalize_with_model_text(const std::string& question,
                                                const std::string& model_text,
                                                const Embedder* embedder,
                                                const GroundingConfig& cfg = {}) {
-    std::vector<RetrievedChunk> used =
-        embedder ? filter_relevant(candidates, question, embedder, cfg)
-                 : filter_relevant_by_score(candidates, cfg.min_score, cfg.max_context_chunks);
+    std::vector<RetrievedChunk> used = filter_relevant(candidates, question, embedder, cfg);
 
     GroundedAnswer ga;
     ga.candidates = candidates;

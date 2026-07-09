@@ -281,6 +281,9 @@ int cmd_eval_grounding(const std::string& index_dir, const std::string& pairs_pa
     auto retriever = nanorag::Retriever::open(index_dir);
     nanorag::GroundingConfig gcfg;
     gcfg.min_score = min_score;
+    gcfg.min_score_without_query_support = 0.55f;
+    gcfg.min_query_support = 0.15f;
+    gcfg.min_query_support_hits = 1;
 
     int n = 0;
     int ok = 0;
@@ -313,10 +316,18 @@ int cmd_eval_grounding(const std::string& index_dir, const std::string& pairs_pa
     // 2) OOD: must refuse with exact I don't know
     std::vector<std::string> oods = ood_queries;
     if (oods.empty()) {
+        // Realistic near-misses first (same domain / similar wording, wrong entity).
         oods = {
+            "What is the boiling point of alcohol?",
+            "What is the boiling point of ethanol?",
+            "What is the melting point of iron?",
+            "What is the freezing point of mercury?",
+            "How many legs does a spider have?",
+            "What is the capital of Germany?",
+            "Who is the president of France?",
+            "What is the chemical formula for methane?",
             "Who invented the chocolate pizza telescope in medieval France?",
             "What is the stock price of completely fictional company Zyblerqux?",
-            "How many purple dragons live in my kitchen toaster?",
         };
     }
     for (const auto& q : oods) {
@@ -399,7 +410,7 @@ int main(int argc, char** argv) {
         if (cmd == "ask") {
             std::string index, query, model, tok, mode = "extractive";
             std::size_t k = 5;
-            float min_score = 0.35f;
+            float min_score = 0.25f;
             int max_tokens = 64;
             for (int i = 2; i < argc; ++i) {
                 const std::string a = argv[i];

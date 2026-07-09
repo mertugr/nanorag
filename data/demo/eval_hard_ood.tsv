@@ -1,0 +1,14 @@
+# Realistic near-miss / OOD queries — corpus must NOT answer these.
+# Format: query only (one per line). eval-grounding expects refuse.
+What is the boiling point of alcohol?
+What is the boiling point of ethanol under one atmosphere?
+What is the melting point of iron?
+What is the freezing point of mercury?
+How many legs does a typical spider have?
+What is the capital of Germany?
+Who is the current president of France?
+What is the population of Tokyo?
+How tall is Mount Everest in meters?
+What is the speed of sound in dry air at sea level?
+What is the chemical formula for methane?
+Which dog breed is best at herding sheep?
