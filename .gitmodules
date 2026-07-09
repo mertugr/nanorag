@@ -1,0 +1,6 @@
+[submodule "third_party/tinyann"]
+	path = third_party/tinyann
+	url = https://github.com/mertugr/tinyann.git
+[submodule "third_party/nanollm"]
+	path = third_party/nanollm
+	url = https://github.com/mertugr/nanollm.git

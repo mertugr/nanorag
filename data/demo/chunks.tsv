@@ -1,0 +1,9 @@
+# nanorag demo corpus — id	source	text
+0	animals	Cats are small domesticated carnivorous mammals. They meow, purr, and often live with humans as pets.
+1	animals	Dogs are domesticated canines. They bark, are social, and are commonly kept as companion animals.
+2	animals	Birds such as sparrows and eagles have feathers and most species can fly.
+3	systems	Tinyann is a C++17 in-memory vector similarity search library with exact, HNSW, IVF, and IVFPQ indexes.
+4	systems	Nanollm is a from-scratch Llama-style LLM inference engine in modern C++ with quantization and chat support.
+5	systems	Nanorag combines tinyann retrieval with nanollm generation to answer questions over a local document store.
+6	science	Water freezes at zero degrees Celsius under standard atmospheric pressure and boils at one hundred degrees.
+7	science	The Earth orbits the Sun once per year and has one natural satellite, the Moon.
