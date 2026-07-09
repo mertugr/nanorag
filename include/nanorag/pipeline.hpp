@@ -26,20 +26,37 @@ struct IndexMeta {
     std::size_t dim = 0;
     std::string metric = "cosine";
     std::string index_kind = "hnsw";
+    /// Total rows in the chunk store (may include NO_EVIDENCE sentinel).
     std::size_t n_chunks = 0;
+    /// Chunks excluding system NO_EVIDENCE (id == kNoEvidenceId).
+    std::size_t n_real_chunks = 0;
+    /// 1 if NO_EVIDENCE was injected at train time.
+    int has_no_evidence = 0;
 };
+
+inline std::size_t count_real_chunks(const ChunkStore& store) {
+    std::size_t n = 0;
+    for (auto id : store.ids()) {
+        if (id != kNoEvidenceId) {
+            ++n;
+        }
+    }
+    return n;
+}
 
 inline void save_meta(const std::string& path, const IndexMeta& m) {
     std::ofstream out(path);
     if (!out) {
         throw std::runtime_error("save_meta: cannot open " + path);
     }
-    out << "nanorag_index_meta_version=1\n";
+    out << "nanorag_index_meta_version=2\n";
     out << "embedder_id=" << m.embedder_id << "\n";
     out << "dim=" << m.dim << "\n";
     out << "metric=" << m.metric << "\n";
     out << "index_kind=" << m.index_kind << "\n";
     out << "n_chunks=" << m.n_chunks << "\n";
+    out << "n_real_chunks=" << m.n_real_chunks << "\n";
+    out << "has_no_evidence=" << m.has_no_evidence << "\n";
 }
 
 inline IndexMeta load_meta(const std::string& path) {
@@ -69,10 +86,18 @@ inline IndexMeta load_meta(const std::string& path) {
             m.index_kind = val;
         } else if (key == "n_chunks") {
             m.n_chunks = static_cast<std::size_t>(std::stoull(val));
+        } else if (key == "n_real_chunks") {
+            m.n_real_chunks = static_cast<std::size_t>(std::stoull(val));
+        } else if (key == "has_no_evidence") {
+            m.has_no_evidence = std::stoi(val);
         }
     }
     if (m.dim == 0 || m.embedder_id.empty()) {
         throw std::runtime_error("load_meta: incomplete meta in " + path);
+    }
+    // Backward compat for v1 meta (no n_real_chunks).
+    if (m.n_real_chunks == 0 && m.n_chunks > 0) {
+        m.n_real_chunks = m.has_no_evidence ? (m.n_chunks > 0 ? m.n_chunks - 1 : 0) : m.n_chunks;
     }
     return m;
 }
@@ -149,8 +174,7 @@ public:
             if (!store.contains(kNoEvidenceId)) {
                 store.add({kNoEvidenceId, "system", kNoEvidenceText});
             }
-            // Out-of-scope queries map to the sentinel so top-1 can mean "refuse".
-            // Mix of absurd OOD and realistic *near-misses* (same domain, wrong entity).
+            // Out-of-scope + realistic near-misses map to the sentinel.
             const char* oods[] = {
                 "What is the boiling point of alcohol?",
                 "What is the boiling point of ethanol?",
@@ -186,9 +210,23 @@ public:
         return r;
     }
 
-    /// Retrieve then apply grounding policy (score + shuffle gate + extractive/refuse).
+    /// Top-1 among real corpus chunks only (skips NO_EVIDENCE). Empty if none.
+    std::int64_t top_real_id(const std::string& query, std::size_t k = 8) const {
+        auto r = retrieve(query, k);
+        for (const auto& h : r.chunks) {
+            if (h.id != kNoEvidenceId) {
+                return h.id;
+            }
+        }
+        return kNoEvidenceId;  // none
+    }
+
+    /// Retrieve then answerability gate + extractive/refuse.
     GroundedAnswer ask_grounded(const std::string& query, std::size_t k,
                                 const GroundingConfig& gcfg = {}) const {
+        if (is_blank_query(query)) {
+            return answer_extractive_for_query(query, {}, gcfg);
+        }
         const std::size_t fetch = std::max(k, gcfg.max_context_chunks * 3);
         auto r = retrieve(query, fetch);
         return answer_extractive_for_query(query, r.chunks, *embedder_, gcfg);
@@ -209,6 +247,8 @@ public:
         meta.metric = "cosine";
         meta.index_kind = "hnsw";
         meta.n_chunks = store_.size();
+        meta.n_real_chunks = count_real_chunks(store_);
+        meta.has_no_evidence = store_.contains(kNoEvidenceId) ? 1 : 0;
         save_meta(dir + "/meta.txt", meta);
     }
 
@@ -241,6 +281,7 @@ public:
     const ChunkStore& store() const { return store_; }
     const Embedder& embedder() const { return *embedder_; }
     std::size_t size() const { return store_.size(); }
+    std::size_t real_size() const { return count_real_chunks(store_); }
 
 private:
     std::shared_ptr<Embedder> embedder_;

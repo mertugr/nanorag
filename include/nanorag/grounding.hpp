@@ -3,15 +3,15 @@
 // Grounding + citations for nanorag.
 //
 // Policy:
-//   1) Retrieve k candidates (scores = query–doc similarity)
-//   2) Keep hits that pass answerability gate (score AND query↔passage support,
-//      or very high score alone for trained paraphrases; NO_EVIDENCE → refuse)
-//   3) If none remain → answer exactly "I don't know" (no generation)
-//   4) Otherwise answer only from those passages and cite [#id]
-//   5) validate_grounding() proves citations + answer tokens ⊆ context
+//   1) Retrieve k candidates (query–doc similarity)
+//   2) Keep hits that pass answerability (lexical query support and/or high score;
+//      NO_EVIDENCE sentinel forces refuse when it wins without answerable real docs)
+//   3) Empty / unanswerable → exact "I don't know"
+//   4) Otherwise extractive evidence passages with [#id] citations
+//   5) validate_grounding: legal cites + answer content tokens ⊆ context
 //
-// Near-miss queries ("boiling point of alcohol" when corpus only has water) must
-// refuse — not dump unrelated high-scoring passages (cats, planets, …).
+// Extractive mode quotes evidence; it is not free-form abstractive QA.
+// Near-miss queries (alcohol BP when corpus only has water) must refuse.
 
 #include "nanorag/embedder.hpp"
 #include "nanorag/prompt.hpp"
@@ -20,8 +20,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
-#include <memory>
-#include <random>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -32,28 +30,38 @@
 namespace nanorag {
 
 inline constexpr const char* kDontKnowAnswer = "I don't know";
-/// Sentinel chunk id trained as the target for out-of-scope queries.
+/// Sentinel chunk id trained as the target for out-of-scope / unanswerable queries.
 inline constexpr std::int64_t kNoEvidenceId = -1;
 inline constexpr const char* kNoEvidenceText =
     "NO_EVIDENCE: the corpus contains no answer to this question.";
 
 struct GroundingConfig {
-    /// Absolute minimum retrieval score (cosine-like).
+    /// Minimum retrieval score (cosine-like) for a hit to be considered.
     float min_score = 0.25f;
-    /// If query has little lexical overlap with a passage, require this higher score
-    /// (trained paraphrases can clear it; weak spurious matches cannot).
+    /// Without query↔passage lexical support, require this higher score (paraphrase path).
     float min_score_without_query_support = 0.55f;
-    /// Min fraction of query *content* tokens that must appear in the passage
-    /// (after light stemming) to count as lexical support.
+    /// Min fraction of query content tokens found in the passage for lexical path.
     float min_query_support = 0.20f;
-    /// At least this many query content tokens must hit the passage when using
-    /// the lexical path (guards short accidental overlaps).
+    /// Min absolute query-content hits for the lexical path.
     int min_query_support_hits = 1;
     std::size_t max_context_chunks = 3;
     bool require_citations = true;
-    /// Min fraction of answer content tokens that must appear in context (0–1).
+    /// Min fraction of answer content tokens that must appear in context.
     float min_content_support = 0.25f;
 };
+
+/// Single source of defaults for CLI, smoke, eval, and library callers.
+inline GroundingConfig default_grounding_config() {
+    GroundingConfig c;
+    c.min_score = 0.25f;
+    c.min_score_without_query_support = 0.55f;
+    c.min_query_support = 0.20f;
+    c.min_query_support_hits = 1;
+    c.max_context_chunks = 3;
+    c.require_citations = true;
+    c.min_content_support = 0.25f;
+    return c;
+}
 
 struct GroundingCheck {
     bool ok = false;
@@ -116,37 +124,22 @@ inline bool is_dont_know(const std::string& answer) {
     return false;
 }
 
-inline std::string shuffle_query_tokens(const std::string& query, std::uint32_t seed) {
-    auto toks = detail::simple_tokenize(query);
-    if (toks.size() < 2) {
-        return query;
-    }
-    std::mt19937 rng(seed);
-    std::shuffle(toks.begin(), toks.end(), rng);
-    std::ostringstream oss;
-    for (std::size_t i = 0; i < toks.size(); ++i) {
-        if (i) {
-            oss << ' ';
-        }
-        oss << toks[i];
-    }
-    return oss.str();
+inline bool is_blank_query(const std::string& query) {
+    return normalize_ws(query).empty();
 }
 
-/// Score-only filter (for unit tests with canned candidates, no embedder).
-inline bool is_no_evidence_chunk(const RetrievedChunk& h) {
-    return h.id == kNoEvidenceId;
-}
+inline bool is_no_evidence_chunk(const RetrievedChunk& h) { return h.id == kNoEvidenceId; }
 
 inline bool is_stop_token(const std::string& t) {
     static const std::unordered_set<std::string> stop = {
-        "a", "an", "the", "is", "are", "was", "were", "be", "been", "to", "of", "in", "on",
-        "for", "and", "or", "as", "by", "with", "from", "that", "this", "it", "its", "at",
-        "do", "does", "did", "not", "no", "yes", "what", "which", "who", "whom", "whose",
-        "when", "where", "why", "how", "many", "much", "can", "could", "would", "should",
-        "will", "may", "might", "than", "then", "into", "about", "over", "under", "between",
-        "my", "your", "our", "their", "his", "her", "there", "here", "has", "have", "had",
-        "point",  // generic in "boiling point" without the substance word
+        "a",    "an",   "the",  "is",   "are",  "was",  "were", "be",   "been", "to",   "of",
+        "in",   "on",   "for",  "and",  "or",   "as",   "by",   "with", "from", "that", "this",
+        "it",   "its",  "at",   "do",   "does", "did",  "not",  "no",   "yes",  "what", "which",
+        "who",  "whom", "whose","when", "where","why",  "how",  "many", "much", "can",  "could",
+        "would","should","will","may",  "might","than", "then", "into", "about","over", "under",
+        "between","my", "your", "our",  "their","his",  "her",  "there","here", "has",  "have",
+        "had",  "point",  // generic in "boiling point" without the substance
+        "based","context","according","source","sources","passage","passages",
     };
     return stop.count(t) != 0 || t.size() <= 1;
 }
@@ -202,7 +195,7 @@ inline bool passage_is_answerable(const std::string& query, const RetrievedChunk
     return h.score >= cfg.min_score_without_query_support;
 }
 
-/// Refuse when NO_EVIDENCE is top and no real answerable passage exists.
+/// Refuse when NO_EVIDENCE is ranked first and no real answerable passage exists.
 inline bool should_refuse_no_evidence(const std::vector<RetrievedChunk>& hits,
                                       const std::string& query, const GroundingConfig& cfg) {
     if (hits.empty() || !is_no_evidence_chunk(hits.front())) {
@@ -220,6 +213,9 @@ inline std::vector<RetrievedChunk> filter_relevant(const std::vector<RetrievedCh
                                                    const std::string& query,
                                                    const Embedder* /*embedder*/,
                                                    const GroundingConfig& cfg) {
+    if (is_blank_query(query)) {
+        return {};
+    }
     if (should_refuse_no_evidence(hits, query, cfg)) {
         return {};
     }
@@ -236,20 +232,17 @@ inline std::vector<RetrievedChunk> filter_relevant(const std::vector<RetrievedCh
     return out;
 }
 
-/// Score+answerability without embedder (same gates; query required).
-inline std::vector<RetrievedChunk> filter_relevant_by_score(const std::vector<RetrievedChunk>& hits,
-                                                            const std::string& query,
-                                                            const GroundingConfig& cfg) {
-    return filter_relevant(hits, query, nullptr, cfg);
-}
-
 inline std::vector<std::int64_t> extract_citation_ids(const std::string& answer) {
     static const std::regex re(R"(\[#?\s*(-?\d+)\s*\])");
     std::vector<std::int64_t> ids;
-    std::sregex_iterator it(answer.begin(), answer.end(), re);
-    std::sregex_iterator end;
-    for (; it != end; ++it) {
-        ids.push_back(std::stoll((*it)[1].str()));
+    try {
+        std::sregex_iterator it(answer.begin(), answer.end(), re);
+        std::sregex_iterator end;
+        for (; it != end; ++it) {
+            ids.push_back(std::stoll((*it)[1].str()));
+        }
+    } catch (const std::exception&) {
+        // malformed number → ignore that match
     }
     std::unordered_set<std::int64_t> seen;
     std::vector<std::int64_t> uniq;
@@ -280,31 +273,25 @@ inline std::string context_blob(const std::vector<RetrievedChunk>& used) {
 inline double content_support_ratio(const std::string& answer,
                                     const std::vector<RetrievedChunk>& used) {
     std::string cleaned = std::regex_replace(answer, std::regex(R"(\[#?\s*-?\d+\s*\])"), " ");
-    auto atoks = detail::simple_tokenize(cleaned);
-    static const std::unordered_set<std::string> stop = {
-        "a",    "an",   "the",  "is",   "are",  "was",  "were", "be",   "been", "to",   "of",
-        "in",   "on",   "for",  "and",  "or",   "as",   "by",   "with", "from", "that", "this",
-        "it",   "its",  "at",   "do",   "does", "did",  "not",  "no",   "yes",  "based",
-        "context", "according", "source", "sources", "passage", "passages"};
-    std::vector<std::string> content;
-    for (const auto& t : atoks) {
-        if (stop.count(t) || t.size() <= 1) {
-            continue;
-        }
-        content.push_back(t);
+    // Strip the extractive prefix if present
+    const std::string prefix = "evidence from retrieved passages:";
+    auto lower = to_lower_copy(cleaned);
+    if (lower.rfind(prefix, 0) == 0) {
+        cleaned = cleaned.substr(prefix.size());
     }
-    if (content.empty()) {
+    auto atoks = content_tokens(cleaned);
+    if (atoks.empty()) {
         return 1.0;
     }
-    auto ctx_toks = detail::simple_tokenize(context_blob(used));
+    auto ctx_toks = content_tokens(context_blob(used));
     std::unordered_set<std::string> ctx(ctx_toks.begin(), ctx_toks.end());
     int hit = 0;
-    for (const auto& t : content) {
+    for (const auto& t : atoks) {
         if (ctx.count(t)) {
             ++hit;
         }
     }
-    return static_cast<double>(hit) / static_cast<double>(content.size());
+    return static_cast<double>(hit) / static_cast<double>(atoks.size());
 }
 
 inline GroundingCheck validate_grounding(const std::string& answer,
@@ -396,21 +383,21 @@ inline std::string build_grounded_prompt(const std::string& question,
     return oss.str();
 }
 
+/// Quote retrieved evidence with citations. Not abstractive QA — labeled as such.
 inline std::string build_extractive_answer(const std::vector<RetrievedChunk>& used) {
     if (used.empty()) {
         return kDontKnowAnswer;
     }
     std::ostringstream oss;
-    for (std::size_t i = 0; i < used.size(); ++i) {
-        if (i) {
-            oss << ' ';
-        }
-        auto text = normalize_ws(used[i].text);
+    oss << "Evidence from retrieved passages:";
+    for (const auto& h : used) {
+        auto text = normalize_ws(h.text);
+        oss << " ";
         oss << text;
         if (!text.empty() && text.back() != '.') {
             oss << '.';
         }
-        oss << " [#" << used[i].id << "]";
+        oss << " [#" << h.id << "]";
     }
     return oss.str();
 }
@@ -436,10 +423,12 @@ inline GroundedAnswer make_answer_from_used(const std::string& question,
     return ga;
 }
 
-/// Answerability path (query required for near-miss rejection).
 inline GroundedAnswer answer_extractive_for_query(const std::string& question,
                                                   const std::vector<RetrievedChunk>& candidates,
                                                   const GroundingConfig& cfg = {}) {
+    if (is_blank_query(question)) {
+        return make_answer_from_used(question, candidates, {}, cfg);
+    }
     auto used = filter_relevant(candidates, question, nullptr, cfg);
     return make_answer_from_used(question, candidates, std::move(used), cfg);
 }
@@ -448,6 +437,9 @@ inline GroundedAnswer answer_extractive_for_query(const std::string& question,
                                                   const std::vector<RetrievedChunk>& candidates,
                                                   const Embedder& embedder,
                                                   const GroundingConfig& cfg = {}) {
+    if (is_blank_query(question)) {
+        return make_answer_from_used(question, candidates, {}, cfg);
+    }
     auto used = filter_relevant(candidates, question, &embedder, cfg);
     return make_answer_from_used(question, candidates, std::move(used), cfg);
 }
@@ -457,6 +449,9 @@ inline GroundedAnswer finalize_with_model_text(const std::string& question,
                                                const std::string& model_text,
                                                const Embedder* embedder,
                                                const GroundingConfig& cfg = {}) {
+    if (is_blank_query(question)) {
+        return make_answer_from_used(question, candidates, {}, cfg);
+    }
     std::vector<RetrievedChunk> used = filter_relevant(candidates, question, embedder, cfg);
 
     GroundedAnswer ga;
@@ -490,7 +485,6 @@ inline GroundedAnswer finalize_with_model_text(const std::string& question,
     return ga;
 }
 
-// Back-compat overload without embedder.
 inline GroundedAnswer finalize_with_model_text(const std::string& question,
                                                const std::vector<RetrievedChunk>& candidates,
                                                const std::string& model_text,

@@ -134,6 +134,15 @@ int main() {
         CHECK(ga.answer == std::string(nanorag::kDontKnowAnswer));
     }
 
+    // --- blank query refuses ---
+    {
+        nanorag::GroundingConfig cfg = nanorag::default_grounding_config();
+        auto ga = nanorag::answer_extractive_for_query("", {}, cfg);
+        CHECK(ga.refused);
+        CHECK(ga.answer == std::string(nanorag::kDontKnowAnswer));
+        CHECK(ga.check.ok);
+    }
+
     // --- end-to-end: paraphrase ok, realistic near-miss refuse ---
     {
         auto store = corpus();
@@ -151,10 +160,7 @@ int main() {
         tcfg.seed = 7;
         auto ret = nanorag::Retriever::build_contrastive(store, pairs, tcfg);
 
-        nanorag::GroundingConfig gcfg;
-        gcfg.min_score = 0.20f;
-        gcfg.min_score_without_query_support = 0.55f;
-        gcfg.min_query_support = 0.15f;
+        nanorag::GroundingConfig gcfg = nanorag::default_grounding_config();
 
         auto water = ret.ask_grounded("At one atmosphere when does pure H2O become gas?", 5, gcfg);
         CHECK(!water.refused);
