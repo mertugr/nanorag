@@ -57,19 +57,17 @@ inline std::uint64_t fnv1a64(const std::string& s) {
     return h;
 }
 
-/// Lowercase ASCII + keep letters/digits; split on other chars. UTF-8 multi-byte
-/// sequences are left as-is for non-ASCII (still hashed as substrings).
+/// Conservative plural fold only: cats→cat, graphs→graph.
+/// Does NOT strip -ed/-ing (those mangled shared→shar, class→clas).
 inline std::string light_stem(std::string t) {
-    // Tiny morphology for demos only (not linguistic-grade).
-    if (t.size() > 4 && t.back() == 's') {
+    if (t.size() > 4 && t.back() == 's' && t[t.size() - 2] != 's') {
+        // avoid ss→s; keep short tokens
         t.pop_back();
-    }
-    if (t.size() > 5 && t.size() >= 3 && t.compare(t.size() - 2, 2, "ed") == 0) {
-        t.resize(t.size() - 2);
     }
     return t;
 }
 
+/// Lowercase ASCII + alnum tokens; non-ASCII bytes kept (UTF-8 multi-byte as substrings).
 inline std::vector<std::string> simple_tokenize(const std::string& text) {
     std::vector<std::string> toks;
     std::string cur;
@@ -96,8 +94,7 @@ inline std::vector<std::string> simple_tokenize(const std::string& text) {
 
 }  // namespace detail
 
-/// Feature-hashing bag-of-tokens embedder (Level 0).
-/// Deterministic, no weights file, L2-normalized for cosine search in tinyann.
+/// Feature-hashing bag-of-tokens embedder. Deterministic, L2-normalized for cosine.
 class HashingEmbedder final : public Embedder {
 public:
     explicit HashingEmbedder(std::size_t dim = 512) : dim_(dim) {
@@ -118,7 +115,6 @@ public:
         for (const auto& tok : toks) {
             const std::uint64_t h = detail::fnv1a64(tok);
             const std::size_t i = static_cast<std::size_t>(h % dim_);
-            // Signed hashing trick reduces collision bias.
             const float sign = ((h >> 32) & 1ull) ? 1.f : -1.f;
             v[i] += sign;
         }
