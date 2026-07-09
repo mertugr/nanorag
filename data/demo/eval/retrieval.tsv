@@ -1,0 +1,20 @@
+# HELD-OUT retrieval labels: query <TAB> gold_chunk_id
+# Must be disjoint from train_pairs.tsv (normalized exact match).
+How do domestic cats signal comfort with a quiet continuous vocalization?	0
+Which common house predator hunts mice and lives alongside people?	0
+Which household animal is famous for barking and playing fetch?	1
+What canid companion often walks outdoors with humans?	1
+Which vertebrate group has feathers and includes eagles and sparrows?	2
+What flying animals construct elevated nests?	2
+Which in-memory C++17 library offers HNSW-style nearest neighbor search?	3
+What project implements exact scan plus hierarchical navigable small world indexes?	3
+Which local runtime loads custom transformer checkpoints without external ML deps?	4
+What engine supports multi-turn token generation with quantized matmuls?	4
+Which app layer ties vector search to a local language model for grounded answers?	5
+What system stores passages, retrieves neighbors, then conditions generation?	5
+At one atmosphere, at what kelvin value does pure water become solid?	6
+Under standard pressure, when does pure H2O turn from liquid into gas?	6
+How many days does Terra take to revolve once around Sol?	7
+What is Earth's primary natural satellite called in plain language?	7
+Which multilayer graph approach trades memory for sublinear embedding search?	8
+What ANN structure is often used for high-dimensional continuous vectors?	8

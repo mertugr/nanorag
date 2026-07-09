@@ -3,6 +3,7 @@
 #include "nanorag/chunk_store.hpp"
 #include "nanorag/contrastive.hpp"
 #include "nanorag/embedder.hpp"
+#include "nanorag/eval.hpp"
 #include "nanorag/grounding.hpp"
 #include "nanorag/pipeline.hpp"
 #include "nanorag/prompt.hpp"
@@ -39,7 +40,8 @@ void usage(const char* argv0) {
         << "         [--model <file.nanollm> --tokenizer <file.nllmtok>] [--max-tokens N]\n"
         << "  " << argv0 << " eval-paraphrase --index <dir> --pairs <eval.tsv> [--max-jaccard F]\n"
         << "  " << argv0 << " eval-grounding --index <dir> --pairs <eval.tsv>\n"
-        << "         [--ood-query <text>]... [--min-score F]\n";
+        << "         [--ood-query <text>]... [--min-score F]\n"
+        << "  " << argv0 << " eval-suite --data data/demo [--no-ablations]\n";
 }
 
 std::string require_arg(int& i, int argc, char** argv, const char* flag) {
@@ -391,6 +393,28 @@ int cmd_eval_grounding(const std::string& index_dir, const std::string& pairs_pa
     return ok == n ? 0 : 1;
 }
 
+
+int cmd_eval_suite(const std::string& data_root, bool ablations) {
+    auto paths = nanorag::eval::default_demo_paths(data_root);
+    nanorag::ContrastiveTrainConfig cfg;
+    cfg.dim = 64;
+    cfg.epochs = 300;
+    cfg.lr = 0.09f;
+    cfg.temperature = 0.05f;
+    cfg.seed = 7;
+    auto primary = nanorag::eval::build_contrastive_from_paths(paths, cfg, true);
+    auto report = nanorag::eval::run_full_eval(primary, paths, nanorag::default_grounding_config(),
+                                               ablations);
+    std::cout << nanorag::eval::format_report(report);
+    const std::string err = nanorag::eval::check_gates(report);
+    if (!err.empty()) {
+        std::cerr << err;
+        return 1;
+    }
+    std::cout << "eval-suite: all quality gates PASS\n";
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -498,6 +522,21 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("eval-paraphrase requires --index and --pairs");
             }
             return cmd_eval_paraphrase(index, pairs, max_j);
+        }
+        if (cmd == "eval-suite") {
+            std::string data = "data/demo";
+            bool ablations = true;
+            for (int i = 2; i < argc; ++i) {
+                const std::string a = argv[i];
+                if (a == "--data") {
+                    data = require_arg(i, argc, argv, "--data");
+                } else if (a == "--no-ablations") {
+                    ablations = false;
+                } else {
+                    throw std::runtime_error("unknown arg: " + a);
+                }
+            }
+            return cmd_eval_suite(data, ablations);
         }
         if (cmd == "eval-grounding") {
             std::string index, pairs;

@@ -10,7 +10,7 @@ Local **C++17 RAG** orchestrator over owned libraries:
 
 No Hugging Face or third-party ML runtimes on the default path.
 
-**Status:** Phase 0 sealed. **Phase 1 packaging** — hybrid submodules (default) + install/export + CI. Not yet a production dual-encoder product.
+**Status:** Phase 0 sealed · Phase 1 packaging · **Phase 2 eval foundation** (labeled sets, R@k/MRR, refuse, grounding, ablations). Not yet a production dual-encoder product.
 
 ---
 
@@ -110,6 +110,9 @@ See [COMPATIBILITY.md](COMPATIBILITY.md) for version matrix and format versions.
 ./build/nanorag ask --index index/demo -q "…" --mode generate \
   --model m.nanollm --tokenizer t.nllmtok
 
+./build/nanorag eval-suite --data data/demo
+# Phase 2: R@k/MRR + refuse IDK + grounding + ablations + quality gates
+
 ./build/nanorag eval-paraphrase --index index/demo \
   --pairs data/demo/eval_paraphrase.tsv
 # top hit among *real* docs only (skips NO_EVIDENCE)
@@ -140,12 +143,37 @@ Query-time embedder **must** match `embedder_id` / `dim`.
 ```
 data/demo/
   chunks.tsv              # neutral passages (not query-shaped answers)
-  train_pairs.tsv         # paraphrase_query \t positive_id
-  eval_paraphrase.tsv     # held-out paraphrases
-  eval_hard_ood.tsv       # realistic near-miss / OOD questions
+  train_pairs.tsv         # TRAIN ONLY paraphrase_query \t positive_id
+  eval/
+    retrieval.tsv         # held-out labels for R@k / MRR / grounding
+    refuse.tsv            # must answer exactly "I don't know"
+    README.md             # format + disjointness rule
+  eval_paraphrase.tsv     # deprecated thin pointer → eval/
+  eval_hard_ood.tsv       # deprecated thin pointer → eval/
 ```
 
 ---
+
+
+## Evaluation (Phase 2 foundation)
+
+Labeled sets live under `data/demo/eval/` and **must not overlap** train queries
+(`data/demo/train_pairs.tsv`). The harness enforces disjointness.
+
+| Metric | Set | Meaning |
+|--------|-----|---------|
+| R@1 / R@3 / R@5, MRR | `eval/retrieval.tsv` | Gold id in ranked real docs |
+| Refuse pass rate | `eval/refuse.tsv` | Exact `I don't know`, empty context |
+| Grounding full pass | retrieval labels | Answer + valid cites + gold cited |
+| Ablations | same retrieval | hashing / word2vec / contrastive |
+
+```bash
+# Full suite (also runs via ctest: nanorag_eval_harness)
+./build/nanorag eval-suite --data data/demo
+ctest --test-dir build -R eval_harness --output-on-failure
+```
+
+See `data/demo/eval/README.md`.
 
 ## Tests
 
@@ -153,6 +181,7 @@ data/demo/
 |--------|----------|
 | `nanorag_tests` | Hashing, store, contrastive paraphrase recall, ablations |
 | `nanorag_grounding_tests` | Citations, alcohol near-miss refuse, blank query, OOD, validator |
+| `nanorag_eval_harness` | Disjoint train/eval, R@k/MRR, refuse, grounding, ablations, hard cases |
 
 ---
 
@@ -169,8 +198,9 @@ data/demo/
 ## Roadmap
 
 1. **Phase 0** — scaffold + contrastive + grounding (**sealed**)
-2. **Phase 1** — hybrid submodules + install/export, CI, VERSION, LICENSE (**this**)
-3. **Phase 2+** — stronger embedders, hybrid lexical+dense, production packaging
+2. **Phase 1** — hybrid submodules + install/export, CI, VERSION, LICENSE
+3. **Phase 2** — eval foundation (this PR): labeled sets, R@k/MRR, refuse, grounding, ablations
+4. **Phase 2+** — retrieval quality lift, stronger embedders, hybrid lexical+dense
 
 ## License
 

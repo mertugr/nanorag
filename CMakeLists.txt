@@ -75,12 +75,24 @@ if(NANORAG_BUILD_TESTS)
   target_link_libraries(nanorag_tests PRIVATE nanorag)
   add_executable(nanorag_grounding_tests tests/test_grounding.cpp)
   target_link_libraries(nanorag_grounding_tests PRIVATE nanorag)
+  add_executable(nanorag_eval_harness tests/test_eval_harness.cpp)
+  target_link_libraries(nanorag_eval_harness PRIVATE nanorag)
   if(NOT MSVC)
     target_compile_options(nanorag_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(nanorag_grounding_tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(nanorag_eval_harness PRIVATE -Wall -Wextra -Wpedantic)
   endif()
   add_test(NAME nanorag_tests COMMAND nanorag_tests)
   add_test(NAME nanorag_grounding_tests COMMAND nanorag_grounding_tests)
+  # Eval harness needs data/demo; run from source root
+  add_test(
+    NAME nanorag_eval_harness
+    COMMAND nanorag_eval_harness
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+  set_tests_properties(nanorag_eval_harness PROPERTIES
+    ENVIRONMENT "NANORAG_DEMO_DATA=${CMAKE_SOURCE_DIR}/data/demo"
+  )
 endif()
 
 # ---------------------------------------------------------------------------

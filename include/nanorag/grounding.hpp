@@ -178,7 +178,7 @@ inline double query_support_in_passage(const std::string& query, const std::stri
     return static_cast<double>(hits) / static_cast<double>(q.size());
 }
 
-/// Per-passage answerability (blocks near-misses like alcohol→water/cats).
+/// Per-passage answerability (blocks near-misses like alcohol/ethanol→water).
 inline bool passage_is_answerable(const std::string& query, const RetrievedChunk& h,
                                   const GroundingConfig& cfg) {
     if (is_no_evidence_chunk(h)) {
@@ -187,8 +187,27 @@ inline bool passage_is_answerable(const std::string& query, const RetrievedChunk
     if (h.score < cfg.min_score) {
         return false;
     }
+    const auto qtoks = content_tokens(query);
+    const auto ptoks = content_tokens(h.text);
+    std::unordered_set<std::string> pset(ptoks.begin(), ptoks.end());
     int hits = 0;
-    const double qsup = query_support_in_passage(query, h.text, &hits);
+    bool missing_distinctive = false;
+    for (const auto& tok : qtoks) {
+        if (pset.count(tok)) {
+            ++hits;
+        } else if (tok.size() >= 5) {
+            // Distinctive query term absent from passage (e.g. ethanol, alcohol, iron).
+            missing_distinctive = true;
+        }
+    }
+    const double qsup =
+        qtoks.empty() ? 0.0 : static_cast<double>(hits) / static_cast<double>(qtoks.size());
+
+    // If a long content token is missing, shared generics like "atmosphere" must not
+    // unlock the lexical path — only a strong embedding score may pass (paraphrase).
+    if (missing_distinctive) {
+        return h.score >= cfg.min_score_without_query_support;
+    }
     if (hits >= cfg.min_query_support_hits && qsup + 1e-12 >= cfg.min_query_support) {
         return true;
     }

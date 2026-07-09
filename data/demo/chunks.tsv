@@ -6,5 +6,5 @@
 4	systems	Nanollm is a dependency-free C++ runtime for decoder-only transformers. It loads custom checkpoints, runs quantized matrix multiplies, and supports multi-turn token generation.
 5	systems	Nanorag is an application layer that stores document passages, embeds them, retrieves neighbors with a vector index, and conditions a local language model on the selected passages.
 6	science	Under one atmosphere of pressure, pure H2O transitions from liquid to solid at 273.15 K and from liquid to gas at 373.15 K.
-7	science	Terra completes one revolution about Sol in approximately 365.25 days and retains a single major natural satellite.
+7	science	Terra (Earth) completes one revolution about Sol in approximately 365.25 days and retains a single major natural satellite known as the Moon.
 8	systems	Hierarchical navigable small world graphs trade a modest memory overhead for sublinear query time when scanning high-dimensional continuous vectors.
