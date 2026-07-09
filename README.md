@@ -10,14 +10,16 @@ Local **RAG** orchestrator over owned libraries:
 
 No Hugging Face or third-party ML runtimes on the default path.
 
-## Phase 0 status
+## Status
 
 - [x] CMake project linking tinyann + nanollm as libraries  
-- [x] `HashingEmbedder` (pure C++, `hashing-v1`)  
-- [x] Chunk store (TSV) + HNSW index save/load  
-- [x] CLI: `smoke` · `ingest` · `ask`  
+- [x] **Word2VecEmbedder** (`word2vec-v1`) — skip-gram + neg sampling, train-on-ingest, pure C++  
+- [x] `HashingEmbedder` (`hashing-v1`) — still available via `--embedder hashing`  
+- [x] Chunk store (TSV) + HNSW index save/load + `embeddings.nw2v`  
+- [x] CLI: `smoke` · `ingest` · `ask` · `Retriever::open`  
+- [x] Retrieval/grounding tests (cats / tinyann / water)  
 - [x] Optional generation when `--model` / `--tokenizer` are set  
-- [ ] Better embedders (TF–IDF / Word2Vec / nanoembed) — later phases  
+- [ ] TF–IDF hybrid / nanoembed encoder — later  
 
 ## Build
 
@@ -35,10 +37,11 @@ ctest --test-dir build --output-on-failure
 ./build/nanorag smoke
 
 # Build an index from the demo corpus
-./build/nanorag ingest --chunks data/demo/chunks.tsv --out index/demo --dim 512
+./build/nanorag ingest --chunks data/demo/chunks.tsv --out index/demo --dim 64 --epochs 50
 
 # Retrieve + print RAG prompt (no LLM)
 ./build/nanorag ask --index index/demo --query "What is tinyann?" --k 3
+./build/nanorag ask --index index/demo --query "which animal meows" --k 2
 
 # Retrieve + generate (needs a .nanollm checkpoint + tokenizer)
 # ./build/nanollm is not built by default; build nanollm CLI separately or point at yours:
@@ -55,6 +58,7 @@ ctest --test-dir build --output-on-failure
 index/demo/
   chunks.tsv           # id \t source \t text
   vectors.hnsw.tann    # tinyann HNSW binary
+  embeddings.nw2v      # word2vec-v1 weights (when using default embedder)
   meta.txt             # embedder_id, dim, metric, …
 ```
 
@@ -72,19 +76,16 @@ data/demo/         # sample chunks
 
 ## Roadmap (short)
 
-1. **Phase 0** — this scaffold (done)  
-2. **Phase 1** — install/export polish for all libs  
-3. **Phase 2** — fuller CLI, docs, hybrid keyword  
-4. **Phase 3** — self-trained embedders (Word2Vec → nanoembed)  
-5. **Phase 4** — production hardening + tagged release  
+1. **Phase 0** — scaffold (done)  
+2. **Word2Vec embeddings** — train-on-ingest, tested (done)  
+3. **Phase 1** — install/export polish for all libs  
+4. **Phase 2** — hybrid keyword + fuller CLI  
+5. **Phase 3** — nanoembed encoder tower  
+6. **Phase 4** — production hardening + tagged release  
 
 ## Submodule notes
 
-`third_party/tinyann` includes a small CMake patch (not yet on upstream `main` until you push it):
-
-- `TINYANN_BUILD_CLI` / `TINYANN_BUILD_TESTS` (default ON standalone; nanorag sets them OFF)
-
-Push that change to the tinyann repo, then update the submodule pointer.
+`tinyann` exposes `TINYANN_BUILD_CLI` / `TINYANN_BUILD_TESTS` (nanorag forces them OFF when nested).
 
 ## License
 

@@ -3,6 +3,7 @@
 #include "nanorag/chunk_store.hpp"
 #include "nanorag/embedder.hpp"
 #include "nanorag/prompt.hpp"
+#include "nanorag/word2vec.hpp"
 
 #include "tinyann/tinyann.hpp"
 
@@ -10,7 +11,6 @@
 #include <cstdint>
 #include <fstream>
 #include <memory>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -31,7 +31,6 @@ inline void save_meta(const std::string& path, const IndexMeta& m) {
     if (!out) {
         throw std::runtime_error("save_meta: cannot open " + path);
     }
-    // Simple key=value (no JSON dependency).
     out << "nanorag_index_meta_version=1\n";
     out << "embedder_id=" << m.embedder_id << "\n";
     out << "dim=" << m.dim << "\n";
@@ -75,6 +74,23 @@ inline IndexMeta load_meta(const std::string& path) {
     return m;
 }
 
+/// Load the embedder that matches index meta (hashing-v1 or word2vec-v1).
+inline std::shared_ptr<Embedder> load_embedder_for_index(const std::string& dir,
+                                                         const IndexMeta& meta) {
+    if (meta.embedder_id == kHashingEmbedderId) {
+        return std::make_shared<HashingEmbedder>(meta.dim);
+    }
+    if (meta.embedder_id == kWord2VecEmbedderId) {
+        auto emb = std::make_shared<Word2VecEmbedder>(Word2VecEmbedder::load(dir + "/embeddings.nw2v"));
+        if (emb->dim() != meta.dim) {
+            throw std::runtime_error("load_embedder_for_index: word2vec dim mismatch");
+        }
+        return emb;
+    }
+    throw std::runtime_error("load_embedder_for_index: unknown embedder_id '" + meta.embedder_id +
+                             "'");
+}
+
 struct RetrieveResult {
     std::vector<RetrievedChunk> chunks;
     std::string prompt;
@@ -105,6 +121,18 @@ public:
         return Retriever(std::move(embedder), std::move(store), std::move(index));
     }
 
+    /// Train Word2Vec on chunk texts, then build HNSW index.
+    static Retriever build_word2vec(ChunkStore store, Word2VecTrainConfig cfg = {},
+                                    tinyann::HnswParams params = {}) {
+        std::vector<std::string> docs;
+        docs.reserve(store.size());
+        for (const auto& c : store.all()) {
+            docs.push_back(c.text);
+        }
+        auto emb = std::make_shared<Word2VecEmbedder>(Word2VecEmbedder::train(docs, cfg));
+        return build(std::move(emb), std::move(store), params);
+    }
+
     RetrieveResult retrieve(const std::string& query, std::size_t k) const {
         auto q = embedder_->embed(query);
         auto hits = index_.search(q, k);
@@ -115,9 +143,11 @@ public:
     }
 
     void save(const std::string& dir) const {
-        // dir must exist.
         store_.save(dir + "/chunks.tsv");
         index_.save(dir + "/vectors.hnsw.tann");
+        if (auto* w2v = dynamic_cast<const Word2VecEmbedder*>(embedder_.get())) {
+            w2v->save(dir + "/embeddings.nw2v");
+        }
         IndexMeta meta;
         meta.embedder_id = embedder_->id();
         meta.dim = embedder_->dim();
@@ -145,6 +175,13 @@ public:
             throw std::runtime_error("Retriever::load: tann dim mismatch");
         }
         return Retriever(std::move(embedder), std::move(store), std::move(index));
+    }
+
+    /// Load index + matching embedder from meta (preferred).
+    static Retriever open(const std::string& dir) {
+        auto meta = load_meta(dir + "/meta.txt");
+        auto emb = load_embedder_for_index(dir, meta);
+        return load(dir, std::move(emb));
     }
 
     const ChunkStore& store() const { return store_; }

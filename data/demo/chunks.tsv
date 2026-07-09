@@ -1,9 +1,11 @@
 # nanorag demo corpus — id	source	text
-0	animals	Cats are small domesticated carnivorous mammals. They meow, purr, and often live with humans as pets.
-1	animals	Dogs are domesticated canines. They bark, are social, and are commonly kept as companion animals.
-2	animals	Birds such as sparrows and eagles have feathers and most species can fly.
-3	systems	Tinyann is a C++17 in-memory vector similarity search library with exact, HNSW, IVF, and IVFPQ indexes.
-4	systems	Nanollm is a from-scratch Llama-style LLM inference engine in modern C++ with quantization and chat support.
-5	systems	Nanorag combines tinyann retrieval with nanollm generation to answer questions over a local document store.
-6	science	Water freezes at zero degrees Celsius under standard atmospheric pressure and boils at one hundred degrees.
-7	science	The Earth orbits the Sun once per year and has one natural satellite, the Moon.
+0	animals	Cats are small domesticated carnivorous mammals. They meow, purr, and often live with humans as pets. Cats chase mice and drink milk.
+1	animals	Dogs are domesticated canines. They bark, wag their tails, go for walks, fetch balls, and are commonly kept as companion animals.
+2	animals	Birds such as sparrows and eagles have feathers and wings. Most bird species can fly and build nests.
+3	systems	Tinyann is a C++17 in-memory vector similarity search library with exact, HNSW, IVF, and IVFPQ indexes for approximate nearest neighbor retrieval.
+4	systems	Nanollm is a from-scratch Llama-style LLM inference engine in modern C++ with quantization, tokenizer, sampler, and interactive chat support.
+5	systems	Nanorag combines tinyann retrieval with nanollm generation to answer questions over a local document store using in-house embeddings.
+6	science	Water freezes at zero degrees Celsius under standard atmospheric pressure and boils at one hundred degrees Celsius.
+7	science	The Earth orbits the Sun once per year and has one natural satellite called the Moon.
+8	systems	HNSW graphs enable fast approximate k-nearest neighbor search in high dimensional embedding spaces used by RAG systems.
+9	animals	A meowing animal that purrs is typically a cat, not a dog or a bird.
