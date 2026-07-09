@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nanorag/chunk_store.hpp"
+#include "nanorag/contrastive.hpp"
 #include "nanorag/embedder.hpp"
 #include "nanorag/prompt.hpp"
 #include "nanorag/word2vec.hpp"
@@ -22,7 +23,7 @@ struct IndexMeta {
     std::string embedder_id;
     std::size_t dim = 0;
     std::string metric = "cosine";
-    std::string index_kind = "hnsw";  // exact | hnsw
+    std::string index_kind = "hnsw";
     std::size_t n_chunks = 0;
 };
 
@@ -74,7 +75,6 @@ inline IndexMeta load_meta(const std::string& path) {
     return m;
 }
 
-/// Load the embedder that matches index meta (hashing-v1 or word2vec-v1).
 inline std::shared_ptr<Embedder> load_embedder_for_index(const std::string& dir,
                                                          const IndexMeta& meta) {
     if (meta.embedder_id == kHashingEmbedderId) {
@@ -87,6 +87,14 @@ inline std::shared_ptr<Embedder> load_embedder_for_index(const std::string& dir,
         }
         return emb;
     }
+    if (meta.embedder_id == kContrastiveEmbedderId) {
+        auto emb =
+            std::make_shared<ContrastiveEmbedder>(ContrastiveEmbedder::load(dir + "/embeddings.nctr"));
+        if (emb->dim() != meta.dim) {
+            throw std::runtime_error("load_embedder_for_index: contrastive dim mismatch");
+        }
+        return emb;
+    }
     throw std::runtime_error("load_embedder_for_index: unknown embedder_id '" + meta.embedder_id +
                              "'");
 }
@@ -96,7 +104,6 @@ struct RetrieveResult {
     std::string prompt;
 };
 
-/// Own-stack retriever: Embedder + tinyann + ChunkStore.
 class Retriever {
 public:
     Retriever(std::shared_ptr<Embedder> embedder, ChunkStore store, tinyann::HnswIndex index)
@@ -121,15 +128,21 @@ public:
         return Retriever(std::move(embedder), std::move(store), std::move(index));
     }
 
-    /// Train Word2Vec on chunk texts, then build HNSW index.
     static Retriever build_word2vec(ChunkStore store, Word2VecTrainConfig cfg = {},
                                     tinyann::HnswParams params = {}) {
         std::vector<std::string> docs;
-        docs.reserve(store.size());
         for (const auto& c : store.all()) {
             docs.push_back(c.text);
         }
         auto emb = std::make_shared<Word2VecEmbedder>(Word2VecEmbedder::train(docs, cfg));
+        return build(std::move(emb), std::move(store), params);
+    }
+
+    static Retriever build_contrastive(ChunkStore store, const std::vector<TrainPair>& pairs,
+                                       ContrastiveTrainConfig cfg = {},
+                                       tinyann::HnswParams params = {}) {
+        auto emb = std::make_shared<ContrastiveEmbedder>(
+            ContrastiveEmbedder::train(store, pairs, cfg));
         return build(std::move(emb), std::move(store), params);
     }
 
@@ -147,6 +160,9 @@ public:
         index_.save(dir + "/vectors.hnsw.tann");
         if (auto* w2v = dynamic_cast<const Word2VecEmbedder*>(embedder_.get())) {
             w2v->save(dir + "/embeddings.nw2v");
+        }
+        if (auto* ctr = dynamic_cast<const ContrastiveEmbedder*>(embedder_.get())) {
+            ctr->save(dir + "/embeddings.nctr");
         }
         IndexMeta meta;
         meta.embedder_id = embedder_->id();
@@ -177,7 +193,6 @@ public:
         return Retriever(std::move(embedder), std::move(store), std::move(index));
     }
 
-    /// Load index + matching embedder from meta (preferred).
     static Retriever open(const std::string& dir) {
         auto meta = load_meta(dir + "/meta.txt");
         auto emb = load_embedder_for_index(dir, meta);

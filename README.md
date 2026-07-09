@@ -1,25 +1,29 @@
 # nanorag
 
-Local **RAG** orchestrator over owned libraries:
+Local **RAG** orchestrator over owned libraries only:
 
 | Library | Role |
 |---------|------|
 | [tinyann](third_party/tinyann) | Vector search (HNSW / exact / …) |
 | [nanollm](third_party/nanollm) | LLM generate / chat |
-| **nanorag** | Chunk store, in-house embedder, retrieve → prompt → generate |
+| **nanorag** | Chunk store, **in-house embedders**, retrieve → prompt → generate |
 
 No Hugging Face or third-party ML runtimes on the default path.
 
-## Status
+## Honest status on retrieval
 
-- [x] CMake project linking tinyann + nanollm as libraries  
-- [x] **Word2VecEmbedder** (`word2vec-v1`) — skip-gram + neg sampling, train-on-ingest, pure C++  
-- [x] `HashingEmbedder` (`hashing-v1`) — still available via `--embedder hashing`  
-- [x] Chunk store (TSV) + HNSW index save/load + `embeddings.nw2v`  
-- [x] CLI: `smoke` · `ingest` · `ask` · `Retriever::open`  
-- [x] Retrieval/grounding tests (cats / tinyann / water)  
-- [x] Optional generation when `--model` / `--tokenizer` are set  
-- [ ] TF–IDF hybrid / nanoembed encoder — later  
+**Unsupervised Word2Vec / hashing are not “real semantic retrieval.”**  
+They mostly reward token overlap. Early demos that only queried with shared keywords (and even stuffed answer-shaped lines into the corpus) were invalid as paraphrase tests.
+
+What works for paraphrase retrieval in this repo today:
+
+| Embedder | How it learns | Paraphrase? |
+|----------|----------------|-------------|
+| `contrastive-v1` (**default**) | Supervised InfoNCE on `(query → doc_id)` pairs you provide | **Yes** (tested) |
+| `word2vec-v1` | Skip-gram on chunk text only | Weak / ablation |
+| `hashing-v1` | Feature hashing | Keyword only |
+
+**You must supply train pairs** for contrastive ingest. Documents stay neutral facts; questions live in pair files—not inside the chunks.
 
 ## Build
 
@@ -33,59 +37,58 @@ ctest --test-dir build --output-on-failure
 ## Quick start
 
 ```bash
-# Unit smoke (no index files)
 ./build/nanorag smoke
 
-# Build an index from the demo corpus
-./build/nanorag ingest --chunks data/demo/chunks.tsv --out index/demo --dim 64 --epochs 50
+# Train contrastive embedder on pairs, index with tinyann HNSW
+./build/nanorag ingest \
+  --chunks data/demo/chunks.tsv \
+  --pairs  data/demo/train_pairs.tsv \
+  --out index/demo \
+  --embedder contrastive --dim 64 --epochs 200
 
-# Retrieve + print RAG prompt (no LLM)
-./build/nanorag ask --index index/demo --query "What is tinyann?" --k 3
-./build/nanorag ask --index index/demo --query "which animal meows" --k 2
+# Held-out paraphrases: enforces low token Jaccard(query, gold) then recall@1
+./build/nanorag eval-paraphrase \
+  --index index/demo \
+  --pairs data/demo/eval_paraphrase.tsv \
+  --max-jaccard 0.30
 
-# Retrieve + generate (needs a .nanollm checkpoint + tokenizer)
-# ./build/nanollm is not built by default; build nanollm CLI separately or point at yours:
-#   cmake -S third_party/nanollm -B build-nanollm -DNANOLLM_BUILD_CLI=ON
-#   cmake --build build-nanollm --target nanollm
-#   ./build-nanollm/nanollm write-synthetic --model-out models/tiny.nanollm --tokenizer-out models/tiny.nllmtok --context 2048
-./build/nanorag ask --index index/demo --query "What is tinyann?" \
-  --model models/tiny.nanollm --tokenizer models/tiny.nllmtok --max-tokens 64
+./build/nanorag ask --index index/demo \
+  -q "Which feline housemate purrs when comfortable?" --k 3
 ```
 
-## Index layout
+## Data layout
 
 ```
+data/demo/
+  chunks.tsv           # neutral passages (id, source, text) — not query-shaped
+  train_pairs.tsv      # paraphrase_query \t positive_id  (contrastive train)
+  eval_paraphrase.tsv  # held-out paraphrases for eval-paraphrase
+
 index/demo/
-  chunks.tsv           # id \t source \t text
-  vectors.hnsw.tann    # tinyann HNSW binary
-  embeddings.nw2v      # word2vec-v1 weights (when using default embedder)
-  meta.txt             # embedder_id, dim, metric, …
+  chunks.tsv
+  vectors.hnsw.tann
+  embeddings.nctr      # contrastive-v1 weights
+  meta.txt
 ```
 
-Query-time embedder **must** match `embedder_id` / `dim` in `meta.txt`.
+## Tests (what “works” means)
 
-## Layout
+`ctest` checks:
 
-```
-include/nanorag/   # embedder, chunk_store, prompt, pipeline
-src/main.cpp       # CLI
-tests/             # CTest
-third_party/       # git submodules: tinyann, nanollm
-data/demo/         # sample chunks
-```
+1. **Paraphrase gate** — eval queries have low token Jaccard vs gold text  
+2. **Contrastive recall@1 = 6/6** on held-out paraphrases  
+3. **Grounding** — RAG prompt contains the retrieved passage text  
+4. **Ablation** — word2vec and hashing get **&lt; 6/6** on the same hard paraphrase set  
 
-## Roadmap (short)
+CLI `eval-paraphrase` fails if any query/gold pair exceeds `--max-jaccard` (default 0.25–0.30).
 
-1. **Phase 0** — scaffold (done)  
-2. **Word2Vec embeddings** — train-on-ingest, tested (done)  
-3. **Phase 1** — install/export polish for all libs  
-4. **Phase 2** — hybrid keyword + fuller CLI  
-5. **Phase 3** — nanoembed encoder tower  
-6. **Phase 4** — production hardening + tagged release  
+## Roadmap
 
-## Submodule notes
-
-`tinyann` exposes `TINYANN_BUILD_CLI` / `TINYANN_BUILD_TESTS` (nanorag forces them OFF when nested).
+1. Phase 0 scaffold — done  
+2. Contrastive paraphrase embeddings + honest eval — done  
+3. Phase 1 — install/export polish for tinyann / nanollm / nanorag  
+4. Stronger encoders (deeper tower / nanoembed) still pure C++  
+5. Production hardening  
 
 ## License
 

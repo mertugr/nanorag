@@ -1,11 +1,10 @@
-# nanorag demo corpus — id	source	text
-0	animals	Cats are small domesticated carnivorous mammals. They meow, purr, and often live with humans as pets. Cats chase mice and drink milk.
-1	animals	Dogs are domesticated canines. They bark, wag their tails, go for walks, fetch balls, and are commonly kept as companion animals.
-2	animals	Birds such as sparrows and eagles have feathers and wings. Most bird species can fly and build nests.
-3	systems	Tinyann is a C++17 in-memory vector similarity search library with exact, HNSW, IVF, and IVFPQ indexes for approximate nearest neighbor retrieval.
-4	systems	Nanollm is a from-scratch Llama-style LLM inference engine in modern C++ with quantization, tokenizer, sampler, and interactive chat support.
-5	systems	Nanorag combines tinyann retrieval with nanollm generation to answer questions over a local document store using in-house embeddings.
-6	science	Water freezes at zero degrees Celsius under standard atmospheric pressure and boils at one hundred degrees Celsius.
-7	science	The Earth orbits the Sun once per year and has one natural satellite called the Moon.
-8	systems	HNSW graphs enable fast approximate k-nearest neighbor search in high dimensional embedding spaces used by RAG systems.
-9	animals	A meowing animal that purrs is typically a cat, not a dog or a bird.
+# Neutral fact corpus (not query-shaped). Paraphrase queries live in train/eval pair files.
+0	animals	Felis catus is a small carnivorous mammal. It produces a low continuous vocalization when content and a short high vocalization when soliciting attention. Domestic lines commonly share dwellings with people and hunt small rodents.
+1	animals	Canis familiaris is a social canid. Individuals vocalize with short explosive sounds, perform object retrieval play, and accompany humans on outdoor excursions.
+2	animals	Aves includes sparrows and eagles. Members have feathers and keratin wings; many species achieve powered flight and construct elevated nests.
+3	systems	Tinyann is a C++17 library for in-memory nearest-neighbor search. It implements brute-force exact scan plus graph and inverted-file approximate indexes including hierarchical navigable small world structures.
+4	systems	Nanollm is a dependency-free C++ runtime for decoder-only transformers. It loads custom checkpoints, runs quantized matrix multiplies, and supports multi-turn token generation.
+5	systems	Nanorag is an application layer that stores document passages, embeds them, retrieves neighbors with a vector index, and conditions a local language model on the selected passages.
+6	science	Under one atmosphere of pressure, pure H2O transitions from liquid to solid at 273.15 K and from liquid to gas at 373.15 K.
+7	science	Terra completes one revolution about Sol in approximately 365.25 days and retains a single major natural satellite.
+8	systems	Hierarchical navigable small world graphs trade a modest memory overhead for sublinear query time when scanning high-dimensional continuous vectors.

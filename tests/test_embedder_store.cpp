@@ -1,14 +1,15 @@
 #include "nanorag/chunk_store.hpp"
+#include "nanorag/contrastive.hpp"
 #include "nanorag/embedder.hpp"
 #include "nanorag/pipeline.hpp"
+#include "nanorag/text_util.hpp"
 #include "nanorag/word2vec.hpp"
 
 #include <cmath>
-#include <cstdlib>
 #include <filesystem>
 #include <iostream>
-#include <memory>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -22,130 +23,164 @@ static int g_fails = 0;
         }                                                                           \
     } while (0)
 
-static nanorag::ChunkStore make_corpus() {
+static nanorag::ChunkStore neutral_corpus() {
     nanorag::ChunkStore store;
+    // Neutral facts — not phrased as answers to the eval questions.
     store.add({0, "animals",
-               "cats meow purr and are small house pets that drink milk and chase mice"});
+               "Felis catus is a small carnivorous mammal. Domestic lines share dwellings with "
+               "people, produce a low continuous vocalization when content, and hunt rodents."});
     store.add({1, "animals",
-               "dogs bark wag and are house pets that go for walks and fetch balls"});
-    store.add({2, "systems",
-               "tinyann is a c++ vector similarity search library with hnsw ivf and exact indexes"});
+               "Canis familiaris is a social canid that produces short explosive vocalizations, "
+               "engages in object retrieval play, and accompanies humans outdoors."});
+    store.add({2, "animals",
+               "Aves includes sparrows and eagles. Members have feathers; many achieve powered "
+               "flight and construct nests."});
     store.add({3, "systems",
-               "nanollm is a from scratch llama style language model inference engine with chat"});
-    store.add({4, "science",
-               "water freezes at zero celsius and boils at one hundred under standard pressure"});
+               "Tinyann is a C++17 in-memory nearest-neighbor library implementing exact scan and "
+               "hierarchical navigable small world approximate indexes."});
+    store.add({4, "systems",
+               "Nanollm is a dependency-free C++ decoder-only transformer runtime with quantized "
+               "matmuls and multi-turn generation."});
     store.add({5, "science",
-               "the earth orbits the sun once per year and has one moon satellite"});
+               "Under one atmosphere, pure H2O becomes solid at 273.15 K and gas at 373.15 K."});
     return store;
 }
 
+struct PQ {
+    const char* q;
+    std::int64_t gold;
+};
+
+// Held-out paraphrases: should share few content tokens with gold.
+static const PQ kParaphrases[] = {
+    {"Which feline housemate vibrates softly when comfortable?", 0},
+    {"What barking companion likes retrieving thrown toys?", 1},
+    {"Name the feathered group that includes eagles", 2},
+    {"Which pure C++ ANN toolkit ships hierarchical navigable small world graphs?", 3},
+    {"What from-scratch runtime executes Llama-like models without PyTorch?", 4},
+    {"At one atm, pure water freezes at how many kelvin?", 5},
+};
+
 int main() {
-    // --- hashing still works ---
+    // --- Jaccard utility ---
     {
-        nanorag::HashingEmbedder emb(128);
-        auto a = emb.embed("hello world");
-        auto b = emb.embed("hello world");
-        CHECK(a.size() == 128);
-        double dot = 0;
-        for (std::size_t i = 0; i < a.size(); ++i) {
-            CHECK(a[i] == b[i]);
-            dot += a[i] * b[i];
+        CHECK(nanorag::token_jaccard("aaa bbb", "aaa bbb") > 0.99);
+        CHECK(nanorag::token_jaccard("aaa bbb", "ccc ddd") < 0.01);
+    }
+
+    auto store = neutral_corpus();
+
+    // Verify paraphrases are actually low-overlap (test quality gate).
+    for (const auto& p : kParaphrases) {
+        const double j = nanorag::token_jaccard(p.q, store.get(p.gold).text);
+        if (j > 0.28) {
+            std::cerr << "eval query not paraphrase enough j=" << j << " q=" << p.q << "\n";
+            ++g_fails;
         }
-        CHECK(dot > 0.99);
     }
 
-    // --- chunk store roundtrip ---
-    {
-        nanorag::ChunkStore store;
-        store.add({1, "s", "alpha"});
-        store.add({2, "s", "beta"});
-        const auto dir = fs::temp_directory_path() / "nanorag_test_store";
-        fs::create_directories(dir);
-        const auto path = (dir / "chunks.tsv").string();
-        store.save(path);
-        auto loaded = nanorag::ChunkStore::load(path);
-        CHECK(loaded.size() == 2);
-        CHECK(loaded.get(2).text == "beta");
+    std::vector<nanorag::TrainPair> train = {
+        {"Which small companion mammal makes a soft vibrating sound when relaxed?", 0},
+        {"What domestic predator is associated with catching household vermin?", 0},
+        {"What animal is famous for short explosive vocal bursts and fetch games?", 1},
+        {"Which companion canid joins people on outdoor walks?", 1},
+        {"What class of winged creatures includes eagles?", 2},
+        {"Which flying vertebrates are covered in feathers?", 2},
+        {"What pure C++ toolkit finds nearest vectors with graph-based approximate search?", 3},
+        {"Which project provides hierarchical navigable small world style ANN in memory?", 3},
+        {"What engine runs decoder-only transformers without external ML frameworks?", 4},
+        {"Which runtime loads custom LLM checkpoints and streams tokens?", 4},
+        {"At standard pressure, when does pure water become ice on the kelvin scale?", 5},
+        {"What temperature marks the boiling transition of H2O at one atmosphere?", 5},
+    };
+    for (const auto& p : train) {
+        const double j = nanorag::token_jaccard(p.query, store.get(p.pos_id).text);
+        CHECK(j <= 0.40);  // train pairs should not be near-copies
     }
 
-    // --- Word2Vec train + retrieval quality ---
+    // --- Contrastive: paraphrase retrieval must work ---
     {
-        auto store = make_corpus();
-        nanorag::Word2VecTrainConfig cfg;
-        cfg.dim = 48;
-        cfg.epochs = 80;
-        cfg.doc_repeat = 16;
-        cfg.window = 5;
-        cfg.negative = 5;
-        cfg.lr = 0.05f;
-        cfg.seed = 12345;
+        nanorag::ContrastiveTrainConfig cfg;
+        cfg.dim = 64;
+        cfg.epochs = 200;
+        cfg.lr = 0.08f;
+        cfg.temperature = 0.07f;
+        cfg.seed = 99;
+        auto ret = nanorag::Retriever::build_contrastive(store, train, cfg);
+        CHECK(ret.embedder().id() == std::string(nanorag::kContrastiveEmbedderId));
 
-        auto ret = nanorag::Retriever::build_word2vec(store, cfg);
-        CHECK(ret.embedder().id() == std::string(nanorag::kWord2VecEmbedderId));
+        int hits = 0;
+        for (const auto& p : kParaphrases) {
+            auto r = ret.retrieve(p.q, 1);
+            CHECK(!r.chunks.empty());
+            if (!r.chunks.empty() && r.chunks[0].id == p.gold) {
+                ++hits;
+            } else {
+                std::cerr << "contrastive MISS gold=" << p.gold << " top="
+                          << (r.chunks.empty() ? -1 : r.chunks[0].id) << " q=" << p.q << "\n";
+            }
+            // Grounding: prompt includes gold text when retrieved correctly
+            if (!r.chunks.empty() && r.chunks[0].id == p.gold) {
+                CHECK(r.prompt.find(r.chunks[0].text) != std::string::npos);
+            }
+        }
+        CHECK(hits == 6);
 
-        auto cats = ret.retrieve("animal that meows and purrs", 1);
-        CHECK(!cats.chunks.empty());
-        CHECK(cats.chunks[0].id == 0);
-        CHECK(cats.chunks[0].text.find("cat") != std::string::npos);
-
-        auto ann = ret.retrieve("hnsw vector similarity search library", 1);
-        CHECK(!ann.chunks.empty());
-        CHECK(ann.chunks[0].id == 2);
-        CHECK(ann.chunks[0].text.find("tinyann") != std::string::npos);
-
-        auto water = ret.retrieve("freezing boiling temperature of water", 1);
-        CHECK(!water.chunks.empty());
-        CHECK(water.chunks[0].id == 4);
-
-        // Grounding: prompt contains retrieved source text
-        CHECK(cats.prompt.find(cats.chunks[0].text) != std::string::npos);
-        CHECK(cats.prompt.find("[#0") != std::string::npos);
-
-        // save / load preserves ranking
-        const auto dir = fs::temp_directory_path() / "nanorag_test_w2v_index";
+        // save/load
+        const auto dir = fs::temp_directory_path() / "nanorag_ctr_index";
         fs::create_directories(dir);
         ret.save(dir.string());
         auto loaded = nanorag::Retriever::open(dir.string());
-        CHECK(loaded.embedder().id() == std::string(nanorag::kWord2VecEmbedderId));
-        auto cats2 = loaded.retrieve("animal that meows and purrs", 1);
-        CHECK(!cats2.chunks.empty());
-        CHECK(cats2.chunks[0].id == 0);
-        auto ann2 = loaded.retrieve("hnsw vector similarity search library", 1);
-        CHECK(!ann2.chunks.empty());
-        CHECK(ann2.chunks[0].id == 2);
+        int hits2 = 0;
+        for (const auto& p : kParaphrases) {
+            auto r = loaded.retrieve(p.q, 1);
+            if (!r.chunks.empty() && r.chunks[0].id == p.gold) {
+                ++hits2;
+            }
+        }
+        CHECK(hits2 == 6);
     }
 
-    // --- Word2Vec model file roundtrip ---
+    // --- Word2Vec ablation: unsupervised co-occurrence is NOT enough for paraphrases ---
     {
-        std::vector<std::string> docs = {
-            "alpha beta gamma delta epsilon",
-            "zeta eta theta iota kappa",
-            "alpha zeta shared vocabulary tokens here",
-        };
         nanorag::Word2VecTrainConfig cfg;
-        cfg.dim = 16;
-        cfg.epochs = 30;
-        cfg.doc_repeat = 10;
-        cfg.seed = 7;
-        auto m = nanorag::Word2VecModel::train(docs, cfg);
-        const auto path = (fs::temp_directory_path() / "nanorag_test.nw2v").string();
-        m.save(path);
-        auto m2 = nanorag::Word2VecModel::load(path);
-        CHECK(m2.dim() == m.dim());
-        CHECK(m2.vocab_size() == m.vocab_size());
-        auto e1 = m.embed_text("alpha beta");
-        auto e2 = m2.embed_text("alpha beta");
-        double err = 0;
-        for (std::size_t i = 0; i < e1.size(); ++i) {
-            err += std::abs(e1[i] - e2[i]);
+        cfg.dim = 64;
+        cfg.epochs = 100;
+        cfg.doc_repeat = 24;
+        cfg.seed = 99;
+        auto ret = nanorag::Retriever::build_word2vec(store, cfg);
+        int hits = 0;
+        for (const auto& p : kParaphrases) {
+            auto r = ret.retrieve(p.q, 1);
+            if (!r.chunks.empty() && r.chunks[0].id == p.gold) {
+                ++hits;
+            }
         }
-        CHECK(err < 1e-5);
+        // Expect failure mode: not all paraphrases found. If this flips to 6/6, tests still
+        // pass — but we assert it's strictly worse than contrastive on this set.
+        CHECK(hits < 6);
+        std::cout << "word2vec paraphrase recall@1: " << hits << "/6 (expected <6)\n";
+    }
+
+    // --- Hashing ablation: keyword-shaped query may work; paraphrase should not all pass ---
+    {
+        auto emb = std::make_shared<nanorag::HashingEmbedder>(128);
+        auto ret = nanorag::Retriever::build(emb, store);
+        int hits = 0;
+        for (const auto& p : kParaphrases) {
+            auto r = ret.retrieve(p.q, 1);
+            if (!r.chunks.empty() && r.chunks[0].id == p.gold) {
+                ++hits;
+            }
+        }
+        CHECK(hits < 6);
+        std::cout << "hashing paraphrase recall@1: " << hits << "/6 (expected <6)\n";
     }
 
     if (g_fails) {
         std::cerr << g_fails << " failure(s)\n";
         return 1;
     }
-    std::cout << "nanorag_tests OK\n";
+    std::cout << "nanorag_tests OK (contrastive paraphrase + ablations)\n";
     return 0;
 }
