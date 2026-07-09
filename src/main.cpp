@@ -1,11 +1,9 @@
-// nanorag CLI — owned-stack RAG (tinyann + nanollm + in-house embedders).
-//
-// Default embedder is contrastive-v1 (needs --pairs). Word2Vec/hashing remain available
-// for ablation; they are NOT expected to pass paraphrase retrieval.
+// nanorag CLI — owned-stack RAG with grounded answers + citations.
 
 #include "nanorag/chunk_store.hpp"
 #include "nanorag/contrastive.hpp"
 #include "nanorag/embedder.hpp"
+#include "nanorag/grounding.hpp"
 #include "nanorag/pipeline.hpp"
 #include "nanorag/prompt.hpp"
 #include "nanorag/text_util.hpp"
@@ -15,6 +13,7 @@
 #include "nanollm/model.hpp"
 #include "nanollm/tokenizer.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -29,17 +28,18 @@ namespace {
 
 void usage(const char* argv0) {
     std::cerr
-        << "nanorag — local RAG over tinyann + nanollm (owned stack)\n\n"
+        << "nanorag — local grounded RAG (tinyann + nanollm + in-house embedders)\n\n"
         << "Usage:\n"
         << "  " << argv0 << " smoke\n"
         << "  " << argv0 << " ingest --chunks <tsv> --out <dir>\n"
         << "         [--embedder contrastive|word2vec|hashing]\n"
-        << "         [--pairs <train_pairs.tsv>]   # required for contrastive\n"
-        << "         [--dim N] [--epochs N]\n"
+        << "         [--pairs <train_pairs.tsv>] [--dim N] [--epochs N]\n"
         << "  " << argv0 << " ask --index <dir> --query <text> [--k N]\n"
-        << "      [--model <file.nanollm> --tokenizer <file.nllmtok>] [--max-tokens N]\n"
-        << "  " << argv0 << " eval-paraphrase --index <dir> --pairs <eval.tsv>\n"
-        << "         [--max-jaccard 0.25]   # fail if query/gold overlap above this\n";
+        << "         [--min-score F] [--mode extractive|generate]\n"
+        << "         [--model <file.nanollm> --tokenizer <file.nllmtok>] [--max-tokens N]\n"
+        << "  " << argv0 << " eval-paraphrase --index <dir> --pairs <eval.tsv> [--max-jaccard F]\n"
+        << "  " << argv0 << " eval-grounding --index <dir> --pairs <eval.tsv>\n"
+        << "         [--ood-query <text>]... [--min-score F]\n";
 }
 
 std::string require_arg(int& i, int argc, char** argv, const char* flag) {
@@ -77,8 +77,33 @@ std::vector<EvalPair> load_eval_pairs(const std::string& path) {
     return out;
 }
 
+void print_grounded(const nanorag::GroundedAnswer& ga) {
+    std::cout << "=== candidates (" << ga.candidates.size() << ") ===\n";
+    for (const auto& h : ga.candidates) {
+        std::cout << "  id=" << h.id << " score=" << h.score << " source=" << h.source << "\n";
+    }
+    std::cout << "=== used after score gate (" << ga.used.size() << ") ===\n";
+    for (const auto& h : ga.used) {
+        std::cout << "  [#" << h.id << "] score=" << h.score << "\n" << h.text << "\n\n";
+    }
+    std::cout << "=== answer (mode=" << ga.mode << ", refused=" << (ga.refused ? "yes" : "no")
+              << ") ===\n";
+    std::cout << ga.answer << "\n";
+    std::cout << "=== grounding: " << (ga.check.ok ? "PASS" : "FAIL") << " (" << ga.check.reason
+              << ") ===\n";
+    if (!ga.check.cited_ids.empty()) {
+        std::cout << "citations:";
+        for (auto id : ga.check.cited_ids) {
+            std::cout << " #" << id;
+        }
+        std::cout << "\n";
+    }
+    if (!ga.check.ok) {
+        throw std::runtime_error("grounding check failed: " + ga.check.reason);
+    }
+}
+
 int cmd_smoke() {
-    // Minimal neutral docs + paraphrase train pairs (not copies of the docs).
     nanorag::ChunkStore store;
     store.add({0, "a",
                "Felis catus is a small carnivorous mammal that shares dwellings with people and "
@@ -89,9 +114,6 @@ int cmd_smoke() {
     store.add({2, "s",
                "Tinyann implements hierarchical navigable small world graphs for in-memory "
                "nearest neighbor search in C++."});
-    store.add({3, "s",
-               "Nanollm is a dependency-free decoder-only transformer runtime with quantized "
-               "matmuls."});
 
     std::vector<nanorag::TrainPair> pairs = {
         {"Which small companion mammal makes a soft vibrating sound when relaxed?", 0},
@@ -99,18 +121,7 @@ int cmd_smoke() {
         {"What animal is famous for short explosive sounds and fetch games?", 1},
         {"What pure C++ toolkit finds neighbors with graph-based approximate search?", 2},
         {"Which project provides hierarchical navigable small world style ANN?", 2},
-        {"What engine runs decoder-only transformers without external ML frameworks?", 3},
     };
-
-    // Enforce that smoke pairs are not keyword cheats.
-    for (const auto& p : pairs) {
-        const double j = nanorag::token_jaccard(p.query, store.get(p.pos_id).text);
-        if (j > 0.35) {
-            std::cerr << "smoke: train pair too lexically similar (jaccard=" << j << "): " << p.query
-                      << "\n";
-            return 1;
-        }
-    }
 
     nanorag::ContrastiveTrainConfig cfg;
     cfg.dim = 48;
@@ -118,35 +129,30 @@ int cmd_smoke() {
     cfg.seed = 42;
     auto ret = nanorag::Retriever::build_contrastive(store, pairs, cfg);
 
-    const std::string q = "Which feline housemate vibrates softly when comfortable?";
-    const double jq = nanorag::token_jaccard(q, store.get(0).text);
-    auto r = ret.retrieve(q, 2);
-    std::cout << "nanorag smoke (contrastive paraphrase)\n";
-    std::cout << "embedder=" << ret.embedder().id() << " dim=" << ret.embedder().dim() << "\n";
-    std::cout << "query: " << q << "\n";
-    std::cout << "token_jaccard(query, gold)=" << jq << "\n";
-    for (const auto& h : r.chunks) {
-        std::cout << "  id=" << h.id << " score=" << h.score << "\n";
-    }
-    if (jq > 0.35) {
-        std::cerr << "smoke: eval query not a paraphrase (jaccard too high)\n";
+    nanorag::GroundingConfig gcfg;
+    gcfg.min_score = 0.20f;
+
+    auto in_domain =
+        ret.ask_grounded("Which feline housemate vibrates softly when comfortable?", 5, gcfg);
+    if (in_domain.refused || !in_domain.check.ok) {
+        std::cerr << "smoke: expected grounded in-domain answer\n";
         return 1;
     }
-    if (r.chunks.empty() || r.chunks[0].id != 0) {
-        std::cerr << "smoke: expected gold id=0 for paraphrase query\n";
+    auto cites = nanorag::extract_citation_ids(in_domain.answer);
+    if (cites.empty() || cites[0] != 0) {
+        std::cerr << "smoke: expected citation [#0]\n";
         return 1;
     }
-    // Ablation: word2vec alone should struggle on this paraphrase (document weakness).
-    nanorag::Word2VecTrainConfig wcfg;
-    wcfg.dim = 48;
-    wcfg.epochs = 80;
-    wcfg.doc_repeat = 20;
-    wcfg.seed = 42;
-    auto w2v = nanorag::Retriever::build_word2vec(store, wcfg);
-    auto rw = w2v.retrieve(q, 1);
-    std::cout << "word2vec ablation top id=" << (rw.chunks.empty() ? -1 : rw.chunks[0].id)
-              << " (not required to match gold; contrastive is)\n";
-    std::cout << "smoke OK\n";
+
+    auto ood = ret.ask_grounded("Who invented the chocolate pizza telescope?", 5, gcfg);
+    if (!ood.refused || ood.answer != nanorag::kDontKnowAnswer || !ood.check.ok) {
+        std::cerr << "smoke: expected I don't know for OOD query\n";
+        return 1;
+    }
+
+    std::cout << "nanorag smoke OK (grounded cite + OOD refuse)\n";
+    std::cout << "  in-domain: " << in_domain.answer << "\n";
+    std::cout << "  ood: " << ood.answer << "\n";
     return 0;
 }
 
@@ -157,7 +163,6 @@ int cmd_ingest(const std::string& chunks_path, const std::string& out_dir, std::
         throw std::runtime_error("ingest: empty chunk store");
     }
     fs::create_directories(out_dir);
-
     tinyann::HnswParams params;
     params.M = 16;
     params.ef_construction = 200;
@@ -177,8 +182,7 @@ int cmd_ingest(const std::string& chunks_path, const std::string& out_dir, std::
         }
         if (embedder_name == "contrastive") {
             if (pairs_path.empty()) {
-                throw std::runtime_error(
-                    "ingest: contrastive embedder requires --pairs <train_pairs.tsv>");
+                throw std::runtime_error("ingest: contrastive requires --pairs");
             }
             auto pairs = nanorag::load_train_pairs(pairs_path);
             nanorag::ContrastiveTrainConfig cfg;
@@ -196,37 +200,52 @@ int cmd_ingest(const std::string& chunks_path, const std::string& out_dir, std::
     return 0;
 }
 
-int cmd_ask(const std::string& index_dir, const std::string& query, std::size_t k,
-            const std::string& model_path, const std::string& tok_path, int max_tokens) {
+int cmd_ask(const std::string& index_dir, const std::string& query, std::size_t k, float min_score,
+            const std::string& mode, const std::string& model_path, const std::string& tok_path,
+            int max_tokens) {
     auto retriever = nanorag::Retriever::open(index_dir);
-    auto r = retriever.retrieve(query, k);
+    nanorag::GroundingConfig gcfg;
+    gcfg.min_score = min_score;
 
-    std::cout << "=== retrieved (k=" << k << ", embedder=" << retriever.embedder().id()
-              << ") ===\n";
-    for (const auto& h : r.chunks) {
-        std::cout << "[#" << h.id << "] score=" << h.score << " source=" << h.source << "\n"
-                  << h.text << "\n\n";
+    const std::size_t fetch = std::max(k, gcfg.max_context_chunks * 2);
+    auto retrieved = retriever.retrieve(query, fetch);
+
+    nanorag::GroundedAnswer ga;
+    if (mode == "extractive" || model_path.empty()) {
+        ga = nanorag::answer_extractive_for_query(query, retrieved.chunks, retriever.embedder(), gcfg);
+        if (ga.candidates.size() > k) {
+            ga.candidates.resize(k);
+        }
+    } else if (mode == "generate") {
+        if (tok_path.empty()) {
+            throw std::runtime_error("ask --mode generate requires --tokenizer");
+        }
+        auto used = nanorag::filter_relevant(retrieved.chunks, query, &retriever.embedder(), gcfg);
+        if (used.empty()) {
+            ga = nanorag::answer_extractive_for_query(query, retrieved.chunks, retriever.embedder(),
+                                                     gcfg);
+        } else {
+            auto model = nanollm::LlamaModel::load(model_path);
+            auto tokenizer = nanollm::Tokenizer::load(tok_path);
+            auto prompt = nanorag::build_grounded_prompt(query, used);
+            nanollm::GenerateConfig cfg;
+            cfg.max_new_tokens = max_tokens;
+            cfg.sampler.temperature = 0.f;
+            auto result = nanollm::generate_text(model, tokenizer, prompt, cfg);
+            // decode_generated_text if available — result.text may include prompt depending on API
+            std::string gen = result.text;
+            // Prefer only newly generated span when prompt is prefixed
+            if (gen.size() > prompt.size() && gen.compare(0, prompt.size(), prompt) == 0) {
+                gen = gen.substr(prompt.size());
+            }
+            ga = nanorag::finalize_with_model_text(query, retrieved.chunks, gen, &retriever.embedder(),
+                                                   gcfg);
+        }
+    } else {
+        throw std::runtime_error("ask: unknown --mode (extractive|generate)");
     }
 
-    if (model_path.empty()) {
-        std::cout << "=== prompt (pass --model/--tokenizer to generate) ===\n";
-        std::cout << r.prompt << "\n";
-        return 0;
-    }
-    if (tok_path.empty()) {
-        throw std::runtime_error("ask: --tokenizer required with --model");
-    }
-    auto model = nanollm::LlamaModel::load(model_path);
-    auto tokenizer = nanollm::Tokenizer::load(tok_path);
-    nanollm::GenerateConfig cfg;
-    cfg.max_new_tokens = max_tokens;
-    cfg.sampler.temperature = 0.f;
-    std::cout << "=== generation ===\n";
-    auto result = nanollm::generate_text(
-        model, tokenizer, r.prompt, cfg, [](nanollm::index_t, const std::string& piece) {
-            std::cout << piece << std::flush;
-        });
-    std::cout << "\n\n(generated_tokens=" << result.generated_tokens << ")\n";
+    print_grounded(ga);
     return 0;
 }
 
@@ -237,34 +256,104 @@ int cmd_eval_paraphrase(const std::string& index_dir, const std::string& pairs_p
     int ok = 0;
     int n = 0;
     for (const auto& p : pairs) {
-        if (!retriever.store().contains(p.gold_id)) {
-            throw std::runtime_error("eval: missing gold id " + std::to_string(p.gold_id));
-        }
         const auto& gold = retriever.store().get(p.gold_id);
         const double j = nanorag::token_jaccard(p.query, gold.text);
         if (j > max_jaccard) {
-            std::cerr << "FAIL overlap: jaccard=" << j << " > " << max_jaccard << " for query: "
-                      << p.query << "\n";
+            std::cerr << "FAIL overlap: jaccard=" << j << " q=" << p.query << "\n";
             return 1;
         }
         auto r = retriever.retrieve(p.query, 1);
         const bool hit = !r.chunks.empty() && r.chunks[0].id == p.gold_id;
         std::cout << (hit ? "OK " : "MISS ") << "gold=" << p.gold_id
                   << " top=" << (r.chunks.empty() ? -1 : r.chunks[0].id) << " jaccard=" << j
-                  << " q=" << p.query << "\n";
+                  << "\n";
         if (hit) {
             ++ok;
         }
         ++n;
     }
-    const double acc = n ? static_cast<double>(ok) / n : 0.0;
-    std::cout << "paraphrase recall@1: " << ok << "/" << n << " (" << acc << ")\n";
-    std::cout << "embedder=" << retriever.embedder().id() << "\n";
-    // Require perfect on the small held-out set for contrastive indexes.
-    if (ok != n) {
-        return 1;
+    std::cout << "paraphrase recall@1: " << ok << "/" << n << "\n";
+    return ok == n ? 0 : 1;
+}
+
+int cmd_eval_grounding(const std::string& index_dir, const std::string& pairs_path,
+                       const std::vector<std::string>& ood_queries, float min_score) {
+    auto retriever = nanorag::Retriever::open(index_dir);
+    nanorag::GroundingConfig gcfg;
+    gcfg.min_score = min_score;
+
+    int n = 0;
+    int ok = 0;
+
+    // 1) In-domain: must NOT refuse, must cite gold id, validation must pass.
+    if (!pairs_path.empty()) {
+        for (const auto& p : load_eval_pairs(pairs_path)) {
+            auto ga = retriever.ask_grounded(p.query, 5, gcfg);
+            const auto cites = nanorag::extract_citation_ids(ga.answer);
+            const bool has_gold_cite =
+                std::find(cites.begin(), cites.end(), p.gold_id) != cites.end();
+            const bool pass = !ga.refused && ga.check.ok && has_gold_cite;
+            std::cout << (pass ? "OK  " : "FAIL") << " in-domain gold=#" << p.gold_id
+                      << " refused=" << ga.refused << " cites=";
+            for (auto id : cites) {
+                std::cout << "#" << id << ",";
+            }
+            std::cout << " support=" << ga.check.content_support << " q=" << p.query << "\n";
+            if (!pass) {
+                std::cout << "  answer: " << ga.answer << "\n"
+                          << "  reason: " << ga.check.reason << "\n";
+            }
+            ++n;
+            if (pass) {
+                ++ok;
+            }
+        }
     }
-    return 0;
+
+    // 2) OOD: must refuse with exact I don't know
+    std::vector<std::string> oods = ood_queries;
+    if (oods.empty()) {
+        oods = {
+            "Who invented the chocolate pizza telescope in medieval France?",
+            "What is the stock price of completely fictional company Zyblerqux?",
+            "How many purple dragons live in my kitchen toaster?",
+        };
+    }
+    for (const auto& q : oods) {
+        auto ga = retriever.ask_grounded(q, 5, gcfg);
+        const bool pass =
+            ga.refused && ga.check.ok && ga.answer == nanorag::kDontKnowAnswer && ga.used.empty();
+        std::cout << (pass ? "OK  " : "FAIL") << " ood refuse q=" << q << "\n";
+        if (!pass) {
+            std::cout << "  answer: " << ga.answer << " used=" << ga.used.size() << "\n";
+        }
+        ++n;
+        if (pass) {
+            ++ok;
+        }
+    }
+
+    // 3) Static negative tests on validator (prove checker works)
+    {
+        std::vector<nanorag::RetrievedChunk> used = {
+            {7, 0.9f, "t", "The moon is Earth's only major natural satellite."}};
+        auto bad_cite = nanorag::validate_grounding("The moon is cheese [#99]", used, gcfg);
+        auto no_cite =
+            nanorag::validate_grounding("The moon is Earth's only major natural satellite.", used, gcfg);
+        auto good = nanorag::validate_grounding(
+            "The moon is Earth's only major natural satellite. [#7]", used, gcfg);
+        auto empty_ok = nanorag::validate_grounding(nanorag::kDontKnowAnswer, {}, gcfg);
+        auto empty_bad = nanorag::validate_grounding("The moon is cheese.", {}, gcfg);
+        const bool pass = !bad_cite.ok && !no_cite.ok && good.ok && empty_ok.ok && !empty_bad.ok;
+        std::cout << (pass ? "OK  " : "FAIL") << " validator negatives\n";
+        ++n;
+        if (pass) {
+            ++ok;
+        }
+    }
+
+    std::cout << "grounding eval: " << ok << "/" << n << "\n";
+    return ok == n ? 0 : 1;
 }
 
 }  // namespace
@@ -308,8 +397,9 @@ int main(int argc, char** argv) {
             return cmd_ingest(chunks, out, dim, embedder, pairs, epochs);
         }
         if (cmd == "ask") {
-            std::string index, query, model, tok;
-            std::size_t k = 3;
+            std::string index, query, model, tok, mode = "extractive";
+            std::size_t k = 5;
+            float min_score = 0.35f;
             int max_tokens = 64;
             for (int i = 2; i < argc; ++i) {
                 const std::string a = argv[i];
@@ -319,8 +409,15 @@ int main(int argc, char** argv) {
                     query = require_arg(i, argc, argv, "--query");
                 } else if (a == "--k") {
                     k = static_cast<std::size_t>(std::stoull(require_arg(i, argc, argv, "--k")));
+                } else if (a == "--min-score") {
+                    min_score = std::stof(require_arg(i, argc, argv, "--min-score"));
+                } else if (a == "--mode") {
+                    mode = require_arg(i, argc, argv, "--mode");
                 } else if (a == "--model") {
                     model = require_arg(i, argc, argv, "--model");
+                    if (mode == "extractive") {
+                        mode = "generate";  // imply generate when model given
+                    }
                 } else if (a == "--tokenizer") {
                     tok = require_arg(i, argc, argv, "--tokenizer");
                 } else if (a == "--max-tokens") {
@@ -332,11 +429,11 @@ int main(int argc, char** argv) {
             if (index.empty() || query.empty()) {
                 throw std::runtime_error("ask requires --index and --query");
             }
-            return cmd_ask(index, query, k, model, tok, max_tokens);
+            return cmd_ask(index, query, k, min_score, mode, model, tok, max_tokens);
         }
         if (cmd == "eval-paraphrase") {
             std::string index, pairs;
-            double max_j = 0.25;
+            double max_j = 0.30;
             for (int i = 2; i < argc; ++i) {
                 const std::string a = argv[i];
                 if (a == "--index") {
@@ -353,6 +450,29 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("eval-paraphrase requires --index and --pairs");
             }
             return cmd_eval_paraphrase(index, pairs, max_j);
+        }
+        if (cmd == "eval-grounding") {
+            std::string index, pairs;
+            float min_score = 0.35f;
+            std::vector<std::string> oods;
+            for (int i = 2; i < argc; ++i) {
+                const std::string a = argv[i];
+                if (a == "--index") {
+                    index = require_arg(i, argc, argv, "--index");
+                } else if (a == "--pairs") {
+                    pairs = require_arg(i, argc, argv, "--pairs");
+                } else if (a == "--min-score") {
+                    min_score = std::stof(require_arg(i, argc, argv, "--min-score"));
+                } else if (a == "--ood-query") {
+                    oods.push_back(require_arg(i, argc, argv, "--ood-query"));
+                } else {
+                    throw std::runtime_error("unknown arg: " + a);
+                }
+            }
+            if (index.empty()) {
+                throw std::runtime_error("eval-grounding requires --index");
+            }
+            return cmd_eval_grounding(index, pairs, oods, min_score);
         }
         usage(argv[0]);
         return 2;

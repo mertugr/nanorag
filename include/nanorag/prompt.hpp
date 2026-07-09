@@ -17,12 +17,13 @@ struct RetrievedChunk {
     std::string text;
 };
 
+// Forward declaration — full grounded prompt lives in grounding.hpp to avoid cycles.
+// Legacy helper kept for raw dumps; prefer build_grounded_prompt via grounding.hpp.
 inline std::string build_rag_prompt(const std::string& question,
                                     const std::vector<RetrievedChunk>& hits) {
     std::ostringstream oss;
-    oss << "You are a careful assistant. Answer using ONLY the context below. "
-           "If the context is insufficient, say you do not know. "
-           "Cite sources as [#id].\n\n";
+    oss << "Use ONLY the context. If insufficient, answer exactly: I don't know. "
+           "Cite every claim as [#id] using only context ids.\n\n";
     oss << "Context:\n";
     if (hits.empty()) {
         oss << "(no retrieved passages)\n";

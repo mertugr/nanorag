@@ -25,6 +25,35 @@ What works for paraphrase retrieval in this repo today:
 
 **You must supply train pairs** for contrastive ingest. Documents stay neutral facts; questions live in pair files—not inside the chunks.
 
+
+## Grounding & citations
+
+Answers are **gated** before any generation:
+
+1. Retrieve candidates (tinyann)
+2. Drop `NO_EVIDENCE` sentinel / low-score hits
+3. If nothing relevant → exact answer: `I don't know` (no LLM call)
+4. Else **extractive** answer from passages only, each cited as `[#id]`
+5. Optional `--mode generate` + nanollm: model text is accepted **only** if
+   `validate_grounding` passes (legal citations + content support); otherwise
+   extractive fallback (never serve ungrounded model text)
+
+```bash
+./build/nanorag ask --index index/demo \
+  -q "Which feline housemate purrs when comfortable?" --min-score 0.20
+# → passage text … [#0]
+
+./build/nanorag ask --index index/demo \
+  -q "Who invented the chocolate pizza telescope?" --min-score 0.20
+# → I don't know
+
+./build/nanorag eval-grounding --index index/demo \
+  --pairs data/demo/eval_paraphrase.tsv --min-score 0.20
+# in-domain cites gold · OOD refuses · validator negatives
+```
+
+`ctest` target `nanorag_grounding_tests` proves the same properties in-process.
+
 ## Build
 
 ```bash

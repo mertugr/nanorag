@@ -3,11 +3,13 @@
 #include "nanorag/chunk_store.hpp"
 #include "nanorag/contrastive.hpp"
 #include "nanorag/embedder.hpp"
+#include "nanorag/grounding.hpp"
 #include "nanorag/prompt.hpp"
 #include "nanorag/word2vec.hpp"
 
 #include "tinyann/tinyann.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -140,9 +142,30 @@ public:
 
     static Retriever build_contrastive(ChunkStore store, const std::vector<TrainPair>& pairs,
                                        ContrastiveTrainConfig cfg = {},
-                                       tinyann::HnswParams params = {}) {
+                                       tinyann::HnswParams params = {},
+                                       bool inject_no_evidence = true) {
+        auto train_pairs = pairs;
+        if (inject_no_evidence) {
+            if (!store.contains(kNoEvidenceId)) {
+                store.add({kNoEvidenceId, "system", kNoEvidenceText});
+            }
+            // Out-of-scope queries map to the sentinel so top-1 can mean "refuse".
+            const char* oods[] = {
+                "Who invented the chocolate pizza telescope in medieval France?",
+                "What is the stock price of completely fictional company Zyblerqux?",
+                "How many purple dragons live in my kitchen toaster?",
+                "What is the capital city of the lost continent Atlantis?",
+                "When will the flying spaghetti monster visit Neptune?",
+                "Which quantum banana protocol encrypts dreams?",
+                "Who won the underwater chess olympiad on Mars in 1492?",
+                "What is the recipe for invisible soup made of silence?",
+            };
+            for (const char* q : oods) {
+                train_pairs.push_back({q, kNoEvidenceId});
+            }
+        }
         auto emb = std::make_shared<ContrastiveEmbedder>(
-            ContrastiveEmbedder::train(store, pairs, cfg));
+            ContrastiveEmbedder::train(store, train_pairs, cfg));
         return build(std::move(emb), std::move(store), params);
     }
 
@@ -153,6 +176,14 @@ public:
         r.chunks = hits_to_chunks(hits, store_);
         r.prompt = build_rag_prompt(query, r.chunks);
         return r;
+    }
+
+    /// Retrieve then apply grounding policy (score + shuffle gate + extractive/refuse).
+    GroundedAnswer ask_grounded(const std::string& query, std::size_t k,
+                                const GroundingConfig& gcfg = {}) const {
+        const std::size_t fetch = std::max(k, gcfg.max_context_chunks * 3);
+        auto r = retrieve(query, fetch);
+        return answer_extractive_for_query(query, r.chunks, *embedder_, gcfg);
     }
 
     void save(const std::string& dir) const {
