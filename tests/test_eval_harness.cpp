@@ -136,17 +136,44 @@ int main() {
             }
         }
 
-        // Hard set: must have ZERO content-token overlap with gold
+        // Hard set: zero gold keywords + no train synonym leakage
         try {
             assert_zero_keyword_overlap(store, hard, "unit-hard");
+            auto tpairs = load_train_pairs(paths.train_pairs);
+            assert_hard_no_synonym_leak(store, hard, tpairs, "unit-hard");
         } catch (const std::exception& e) {
-            std::cerr << "FAIL hard zero-keyword: " << e.what() << "\n";
+            std::cerr << "FAIL hard integrity: " << e.what() << "\n";
             ++g_fails;
         }
         for (const auto& q : hard) {
             if (!has_zero_keyword_overlap(q.query, store.get(q.gold_id).text)) {
                 std::cerr << "FAIL hard overlap: " << q.query << "\n";
                 ++g_fails;
+            }
+            const double cov = ngram_query_coverage(q.query, store.get(q.gold_id).text);
+            if (cov > 0.15 + 1e-12) {
+                std::cerr << "FAIL hard ngram cov=" << cov << " q=" << q.query << "\n";
+                ++g_fails;
+            }
+        }
+        // Positive control: near-dup train leakage must be detected
+        {
+            auto tpairs = load_train_pairs(paths.train_pairs);
+            if (!tpairs.empty()) {
+                std::vector<LabeledQuery> leak = {{tpairs.front().query, tpairs.front().pos_id}};
+                // If gold has different tokens, still should fail seq sim vs itself in train
+                try {
+                    // Construct explicit near-dup of first train query with same gold if possible
+                    LabeledQuery fake;
+                    fake.query = tpairs.front().query;
+                    fake.gold_id = tpairs.front().pos_id;
+                    // May also fail gold overlap — either way integrity must throw
+                    assert_hard_no_synonym_leak(store, {fake}, tpairs, "expect-leak");
+                    std::cerr << "FAIL expected synonym-leak detection to throw\n";
+                    ++g_fails;
+                } catch (const std::exception&) {
+                    // expected
+                }
             }
         }
 

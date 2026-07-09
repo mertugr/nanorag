@@ -35,30 +35,3 @@ What body is the primary natural satellite of Terra?	7
 What body orbits Terra as its moon?	7
 What data structure enables sublinear neighbor queries in continuous embedding spaces?	8
 Which graph family is used for fast approximate search over high-dimensional vectors?	8
-# TRAIN HARD-STYLE paraphrases (not in eval/*; not near-copies) — teach synonymy
-What tiny predator likes warm laps and soft rumbling noises?	0
-Which apartment animal is famous for midnight zoomies after napping?	0
-Name the whiskered roommate that greets you at the door for treats.	0
-What tail-wagging friend joins road trips and beach runs?	1
-Which animal learns sit and stay then sprints after frisbees?	1
-Name the pack-oriented pet that howls when sirens pass.	1
-Which creatures migrate thousands of miles using flapping flight?	2
-Name warm animals that whistle from telephone wires at dusk.	2
-What egg producers often claim the top of a spruce?	2
-What owned search kit keeps the whole index inside one process?	3
-Name the ANN toolkit that avoids remote calls for neighbor ranking.	3
-What offline stack turns weight dumps into streaming chat text?	4
-Which from-scratch engine runs conversation models on a laptop alone?	4
-Name a dependency-light decoder path for private on-device replies.	4
-What app wires passage ranking into offline chat with footnotes?	5
-Which product joins similarity lookup with a private generator for QA?	5
-Name the glue that ranks docs then prompts an offline chat engine.	5
-When does everyday weather make clear drinking fluid turn solid?	6
-At street-level air, when does clear dihydrogen monoxide start bubbling hard?	6
-What kelvin number freezes clean kitchen liquid in open air roughly?	6
-Roughly how many sunrises pass before our home world loops its star?	7
-What large rock keeps company with the planet people call home?	7
-Name the big satellite rock circling the world we inhabit.	7
-What layered mesh spends RAM so nearby points are found faster?	8
-Which topology accelerates nearby-item search among dense features?	8
-What structure buys speed with extra memory for similar-point lookup?	8

@@ -224,6 +224,178 @@ inline void assert_zero_keyword_overlap(const ChunkStore& store,
     }
 }
 
+/// Character n-gram (3/4) set over content tokens — catches morph leakage (feline/felis).
+inline std::unordered_set<std::string> content_char_ngrams(const std::string& text) {
+    std::unordered_set<std::string> out;
+    for (const auto& tok : content_tokens(text)) {
+        const std::string s = std::string("^") + tok + "$";
+        for (int n : {3, 4}) {
+            if (static_cast<int>(s.size()) < n) {
+                continue;
+            }
+            for (std::size_t i = 0; i + static_cast<std::size_t>(n) <= s.size(); ++i) {
+                out.insert(s.substr(i, static_cast<std::size_t>(n)));
+            }
+        }
+    }
+    return out;
+}
+
+/// Fraction of query content-char-ngrams that also appear in passage.
+inline double ngram_query_coverage(const std::string& query, const std::string& passage) {
+    const auto q = content_char_ngrams(query);
+    if (q.empty()) {
+        return 0.0;
+    }
+    const auto p = content_char_ngrams(passage);
+    int hit = 0;
+    for (const auto& g : q) {
+        if (p.count(g)) {
+            ++hit;
+        }
+    }
+    return static_cast<double>(hit) / static_cast<double>(q.size());
+}
+
+inline double content_token_jaccard(const std::string& a, const std::string& b) {
+    const auto ta = content_tokens(a);
+    const auto tb = content_tokens(b);
+    std::unordered_set<std::string> sa(ta.begin(), ta.end());
+    std::unordered_set<std::string> sb(tb.begin(), tb.end());
+    if (sa.empty() && sb.empty()) {
+        return 1.0;
+    }
+    if (sa.empty() || sb.empty()) {
+        return 0.0;
+    }
+    std::size_t inter = 0;
+    for (const auto& t : sa) {
+        if (sb.count(t)) {
+            ++inter;
+        }
+    }
+    return static_cast<double>(inter) / static_cast<double>(sa.size() + sb.size() - inter);
+}
+
+/// Near-dup score on **content-token** sequences (not char LCS).
+/// Char LCS falsely flags unrelated "Which … ?" templates as similar.
+inline double sequence_similarity(const std::string& a_in, const std::string& b_in) {
+    const auto a = content_tokens(a_in);
+    const auto b = content_tokens(b_in);
+    if (a.empty() && b.empty()) {
+        return 1.0;
+    }
+    if (a.empty() || b.empty()) {
+        return 0.0;
+    }
+    const std::size_t n = a.size();
+    const std::size_t m = b.size();
+    std::vector<std::size_t> prev(m + 1, 0), cur(m + 1, 0);
+    for (std::size_t i = 1; i <= n; ++i) {
+        for (std::size_t j = 1; j <= m; ++j) {
+            if (a[i - 1] == b[j - 1]) {
+                cur[j] = prev[j - 1] + 1;
+            } else {
+                cur[j] = std::max(prev[j], cur[j - 1]);
+            }
+        }
+        prev.swap(cur);
+        std::fill(cur.begin(), cur.end(), 0);
+    }
+    const double lcs = static_cast<double>(prev[m]);
+    return 2.0 * lcs / static_cast<double>(n + m);
+}
+
+struct HardIntegrityLimits {
+    double max_train_seq_sim = 0.50;
+    double max_train_content_jaccard = 0.25;
+    double max_gold_ngram_coverage = 0.15;
+    int min_distinctive_token_len = 4;
+};
+
+/// Fail if hard queries leak via train near-duplicates / shared synonym tokens / ngram morph.
+inline void assert_hard_no_synonym_leak(const ChunkStore& store,
+                                        const std::vector<LabeledQuery>& hard,
+                                        const std::vector<TrainPair>& train_pairs,
+                                        const std::string& name,
+                                        HardIntegrityLimits lim = {}) {
+    std::ostringstream oss;
+    int bad = 0;
+    for (const auto& hq : hard) {
+        const auto& gold = store.get(hq.gold_id);
+        std::vector<std::string> reasons;
+
+        if (!keyword_overlap(hq.query, gold.text).empty()) {
+            reasons.push_back("gold content-token overlap");
+        }
+        const double ncov = ngram_query_coverage(hq.query, gold.text);
+        if (ncov > lim.max_gold_ngram_coverage + 1e-12) {
+            reasons.push_back("gold ngram_qcov=" + std::to_string(ncov));
+        }
+
+        double best_seq = 0, best_j = 0;
+        std::string best_seq_q, best_j_q;
+        std::unordered_set<std::string> same_id_train_toks;
+        for (const auto& tp : train_pairs) {
+            const double s = sequence_similarity(hq.query, tp.query);
+            const double j = content_token_jaccard(hq.query, tp.query);
+            if (s > best_seq) {
+                best_seq = s;
+                best_seq_q = tp.query;
+            }
+            if (j > best_j) {
+                best_j = j;
+                best_j_q = tp.query;
+            }
+            if (tp.pos_id == hq.gold_id) {
+                for (const auto& t : content_tokens(tp.query)) {
+                    if (static_cast<int>(t.size()) >= lim.min_distinctive_token_len) {
+                        same_id_train_toks.insert(t);
+                    }
+                }
+            }
+        }
+        if (best_seq + 1e-12 >= lim.max_train_seq_sim) {
+            reasons.push_back("train seq_sim=" + std::to_string(best_seq) + " ~ " + best_seq_q);
+        }
+        if (best_j + 1e-12 >= lim.max_train_content_jaccard) {
+            reasons.push_back("train content_jaccard=" + std::to_string(best_j) + " ~ " +
+                              best_j_q);
+        }
+        std::vector<std::string> shared;
+        for (const auto& t : content_tokens(hq.query)) {
+            if (static_cast<int>(t.size()) >= lim.min_distinctive_token_len &&
+                same_id_train_toks.count(t)) {
+                shared.push_back(t);
+            }
+        }
+        if (!shared.empty()) {
+            std::ostringstream s;
+            s << "same-id train distinctive tokens={";
+            for (std::size_t i = 0; i < shared.size(); ++i) {
+                if (i) {
+                    s << ",";
+                }
+                s << shared[i];
+            }
+            s << "}";
+            reasons.push_back(s.str());
+        }
+
+        if (!reasons.empty()) {
+            ++bad;
+            oss << "  - id=" << hq.gold_id << " | " << hq.query << "\n";
+            for (const auto& r : reasons) {
+                oss << "      * " << r << "\n";
+            }
+        }
+    }
+    if (bad) {
+        throw std::runtime_error(name + ": " + std::to_string(bad) +
+                                 " hard queries fail synonym-leak integrity:\n" + oss.str());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Retrieval metrics (real docs only — skip NO_EVIDENCE)
 // ---------------------------------------------------------------------------
@@ -490,6 +662,9 @@ inline EvalReport run_full_eval(const Retriever& primary, const EvalPaths& paths
 
     auto store = ChunkStore::load(paths.chunks);
     assert_zero_keyword_overlap(store, hard, "retrieval_hard");
+    // Hard must not be solvable via train near-dups / shared synonym tokens / morph ngrams.
+    auto train_pairs = load_train_pairs(paths.train_pairs);
+    assert_hard_no_synonym_leak(store, hard, train_pairs, "retrieval_hard");
 
     EvalReport rep;
     rep.disjoint_ok = true;

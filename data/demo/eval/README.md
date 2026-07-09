@@ -3,33 +3,33 @@
 | File | Format | Purpose |
 |------|--------|---------|
 | `../train_pairs.tsv` | `query \t gold_id` | Contrastive **training only** |
-| `retrieval.tsv` | `query \t gold_id` | **Easy** held-out retrieval (may share gold keywords) |
-| `retrieval_hard.tsv` | `query \t gold_id` | **Hard** held-out: **zero content-token overlap** with gold |
+| `retrieval.tsv` | `query \t gold_id` | **Easy** held-out (may share gold keywords) — smoke |
+| `retrieval_hard.tsv` | `query \t gold_id` | **Hard** held-out with full integrity (below) |
 | `refuse.tsv` | `query` | Must refuse with `I don't know` |
 
 ## Why two retrieval splits?
 
-Easy paraphrases often keep distinctive gold words (`H2O`, `feathers`, `hierarchical`…).
-Bag-of-words / hashing embedders then look strong (**R@1≈1**) without true semantic match.
-That number is **not** a dual-encoder quality measure.
+Easy paraphrases often keep distinctive gold words. Bag-of-words then looks strong
+without true semantic match. **Do not treat easy R@1 as dual-encoder quality.**
 
-`retrieval_hard.tsv` forbids any shared **content token** (same stop list + `simple_tokenize`
-as answerability) between query and gold passage. Report **hard** R@k / MRR as the honest
-retrieval score. **contrastive-v2** (projection MLP + char n-grams + bigrams + synonymy
-train pairs) targets this split; hashing/word2vec remain weak ablations.
+## Hard integrity (synonym-leak resistant)
 
-## Disjointness rules
+`retrieval_hard.tsv` must pass **all** of the following (enforced by harness):
 
-After normalize (lowercase, collapse whitespace):
+1. **Zero content-token overlap** with gold passage (`simple_tokenize` + stop list)
+2. **String disjoint** from train + easy + refuse (normalized)
+3. **Train near-dup ban**: max sequence similarity to any train query **< 0.50**
+4. **Train token Jaccard ban**: content-token Jaccard to any train query **< 0.25**
+5. **Same-id train token ban**: no distinctive token (len≥4) shared with any train
+   query labeled to the same gold id (blocks synonym memorization)
+6. **Morph n-gram ban**: fraction of query content char-ngrams (3/4) found in gold
+   **≤ 0.15** (blocks feline↔felis style leakage for n-gram models)
 
-1. No query in any eval file may appear in `train_pairs.tsv`
-2. Hard queries must not appear in the easy set either
-3. Hard queries must have `keyword_overlap(query, gold_text) == {}` (enforced by harness)
+If a reported hard R@1 jump required near-duplicate train paraphrases of the hard
+set, that gain is **invalid**. Fix the data, not the model score.
 
 ## Metrics
 
 - **retrieval_easy:** R@k, MRR — smoke / lexical path only
-- **retrieval_hard:** R@k, MRR — honest semantic retrieval
-- **Refuse:** exact IDK + empty used context
-- **Grounding:** easy labels — citation legality + gold cited + validator
-- **Ablations:** hashing / word2vec / contrastive on **both** easy and hard
+- **retrieval_hard:** R@k, MRR — honest semantic retrieval under integrity rules
+- **Refuse / grounding / ablations:** as before

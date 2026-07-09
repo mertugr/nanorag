@@ -10,7 +10,7 @@ Local **C++17 RAG** orchestrator over owned libraries:
 
 No Hugging Face or third-party ML runtimes on the default path.
 
-**Status:** Phase 0 sealed · Phase 1 packaging · Phase 2 eval foundation · **contrastive-v2** dense encoder (hard R@1 ≈0.89 on zero-keyword split). Not yet production dual-encoder scale.
+**Status:** Phase 0 sealed · Phase 1 packaging · Phase 2 eval foundation · contrastive-v2 dense encoder. Honest hard retrieval (no train synonym leak) is still weak — not production dual-encoder quality.
 
 ---
 
@@ -165,13 +165,13 @@ Labeled sets live under `data/demo/eval/` and **must not overlap** train queries
 | Metric | Set | Meaning |
 |--------|-----|---------|
 | R@k / MRR **easy** | `eval/retrieval.tsv` | May share gold keywords — **smoke only** |
-| R@k / MRR **hard** | `eval/retrieval_hard.tsv` | **Zero** content-token overlap with gold — honest retrieval |
+| R@k / MRR **hard** | `eval/retrieval_hard.tsv` | Zero gold keywords **and** no train synonym/near-dup leakage |
 | Refuse pass rate | `eval/refuse.tsv` | Exact `I don't know`, empty context |
 | Grounding full pass | easy retrieval labels | Answer + valid cites + gold cited |
 | Ablations | easy + hard | hashing / word2vec / contrastive |
 
-> Easy R@1≈1 is **not** dual-encoder quality. Report **hard** R@k/MRR for retrieval truth.
-> Bag-of-words contrastive-v1 is expected to be weak on hard until stronger embedders.
+> Easy R@1≈1 is **not** dual-encoder quality. **Hard** forbids gold keyword overlap **and**
+> train near-dups / same-id synonym tokens / morph n-gram leakage — that is the honest score.
 
 ```bash
 # Full suite (also runs via ctest: nanorag_eval_harness)
