@@ -1,0 +1,15 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# If this package was built against installed deps, re-find them.
+# When installed as a self-contained prefix (submodule build), targets are in the export.
+if(NOT TARGET tinyann::tinyann)
+  find_dependency(tinyann 0.1)
+endif()
+if(NOT TARGET nanollm::nanollm)
+  find_dependency(nanollm 0.4)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/nanoragTargets.cmake")
+check_required_components(nanorag)
