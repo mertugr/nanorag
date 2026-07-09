@@ -15,8 +15,8 @@ That number is **not** a dual-encoder quality measure.
 
 `retrieval_hard.tsv` forbids any shared **content token** (same stop list + `simple_tokenize`
 as answerability) between query and gold passage. Report **hard** R@k / MRR as the honest
-retrieval score. Current contrastive-v1 is mean-pooled BOW and is expected to score poorly
-here until stronger embedders land.
+retrieval score. **contrastive-v2** (projection MLP + char n-grams + bigrams + synonymy
+train pairs) targets this split; hashing/word2vec remain weak ablations.
 
 ## Disjointness rules
 

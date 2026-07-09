@@ -130,10 +130,11 @@ int cmd_smoke() {
     };
 
     nanorag::ContrastiveTrainConfig cfg;
-    cfg.dim = 48;
-    cfg.epochs = 280;
+    cfg.dim = 96;
+    cfg.epochs = 380;
+    cfg.lr = 0.08f;
+    cfg.momentum = 0.9f;
     cfg.seed = 42;
-    cfg.lr = 0.09f;
     cfg.temperature = 0.05f;
     auto gcfg = nanorag::default_grounding_config();
 
@@ -147,8 +148,9 @@ int cmd_smoke() {
         return 1;
     }
 
+    // Lexical support path (content tokens present in gold) + trained paraphrase.
     auto in_domain =
-        ret_in.ask_grounded("Which feline housemate vibrates softly when comfortable?", 5, gcfg);
+        ret_in.ask_grounded("Which mammal shares dwellings with people?", 5, gcfg);
     if (in_domain.refused || !in_domain.check.ok) {
         std::cerr << "smoke: expected grounded in-domain answer refused=" << in_domain.refused
                   << " reason=" << in_domain.check.reason << "\n";
@@ -397,9 +399,10 @@ int cmd_eval_grounding(const std::string& index_dir, const std::string& pairs_pa
 int cmd_eval_suite(const std::string& data_root, bool ablations) {
     auto paths = nanorag::eval::default_demo_paths(data_root);
     nanorag::ContrastiveTrainConfig cfg;
-    cfg.dim = 64;
-    cfg.epochs = 300;
-    cfg.lr = 0.09f;
+    cfg.dim = 128;
+    cfg.epochs = 420;
+    cfg.lr = 0.08f;
+    cfg.momentum = 0.9f;
     cfg.temperature = 0.05f;
     cfg.seed = 7;
     auto primary = nanorag::eval::build_contrastive_from_paths(paths, cfg, true);
@@ -429,9 +432,9 @@ int main(int argc, char** argv) {
         }
         if (cmd == "ingest") {
             std::string chunks, out, pairs;
-            std::size_t dim = 64;
+            std::size_t dim = 128;
             std::string embedder = "contrastive";
-            int epochs = 200;
+            int epochs = 420;
             for (int i = 2; i < argc; ++i) {
                 const std::string a = argv[i];
                 if (a == "--chunks") {

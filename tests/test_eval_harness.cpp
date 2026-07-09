@@ -158,9 +158,10 @@ int main() {
         }
 
         ContrastiveTrainConfig cfg;
-        cfg.dim = 64;
-        cfg.epochs = 320;
-        cfg.lr = 0.09f;
+        cfg.dim = 128;
+        cfg.epochs = 420;
+        cfg.lr = 0.08f;
+        cfg.momentum = 0.9f;
         cfg.temperature = 0.05f;
         cfg.seed = 7;
         auto primary = build_contrastive_from_paths(paths, cfg, /*inject_no_evidence=*/true);

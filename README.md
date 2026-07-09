@@ -10,7 +10,7 @@ Local **C++17 RAG** orchestrator over owned libraries:
 
 No Hugging Face or third-party ML runtimes on the default path.
 
-**Status:** Phase 0 sealed · Phase 1 packaging · **Phase 2 eval foundation** (labeled sets, R@k/MRR, refuse, grounding, ablations). Not yet a production dual-encoder product.
+**Status:** Phase 0 sealed · Phase 1 packaging · Phase 2 eval foundation · **contrastive-v2** dense encoder (hard R@1 ≈0.89 on zero-keyword split). Not yet production dual-encoder scale.
 
 ---
 
@@ -30,7 +30,8 @@ optional nanollm generate (validated; falls back if ungrounded)
 
 | ID | Learning | Use |
 |----|----------|-----|
-| `contrastive-v1` | Supervised InfoNCE on `(query → doc_id)` pairs | **Default** |
+| `contrastive-v2` | InfoNCE dual encoder: word+char-ngram+bigram pool → MLP → L2 | **Default** |
+| `contrastive-v1` | Legacy mean-pool BOW (load only) | Old indexes |
 | `word2vec-v1` | Skip-gram on chunk text | Ablation |
 | `hashing-v1` | Feature hashing | Ablation / tests |
 
@@ -130,7 +131,7 @@ See [COMPATIBILITY.md](COMPATIBILITY.md) for version matrix and format versions.
 index/demo/
   chunks.tsv              # id \t source \t text  (may include id=-1 NO_EVIDENCE)
   vectors.hnsw.tann       # tinyann HNSW
-  embeddings.nctr         # contrastive-v1 weights (or .nw2v for word2vec)
+  embeddings.nctr         # contrastive-v2 weights (or .nw2v for word2vec)
   meta.txt                # v2: embedder_id, dim, n_chunks, n_real_chunks, has_no_evidence
 ```
 

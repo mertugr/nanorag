@@ -39,7 +39,7 @@ struct GroundingConfig {
     /// Minimum retrieval score (cosine-like) for a hit to be considered.
     float min_score = 0.25f;
     /// Without query↔passage lexical support, require this higher score (paraphrase path).
-    float min_score_without_query_support = 0.55f;
+    float min_score_without_query_support = 0.60f;
     /// Min fraction of query content tokens found in the passage for lexical path.
     float min_query_support = 0.20f;
     /// Min absolute query-content hits for the lexical path.
@@ -54,7 +54,7 @@ struct GroundingConfig {
 inline GroundingConfig default_grounding_config() {
     GroundingConfig c;
     c.min_score = 0.25f;
-    c.min_score_without_query_support = 0.55f;
+    c.min_score_without_query_support = 0.60f;
     c.min_query_support = 0.20f;
     c.min_query_support_hits = 1;
     c.max_context_chunks = 3;
