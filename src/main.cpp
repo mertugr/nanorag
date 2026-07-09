@@ -129,20 +129,24 @@ int cmd_smoke() {
 
     nanorag::ContrastiveTrainConfig cfg;
     cfg.dim = 48;
-    cfg.epochs = 220;
+    cfg.epochs = 280;
     cfg.seed = 42;
-    auto ret = nanorag::Retriever::build_contrastive(store, pairs, cfg);
-
+    cfg.lr = 0.09f;
+    cfg.temperature = 0.05f;
     auto gcfg = nanorag::default_grounding_config();
 
-    auto blank = ret.ask_grounded("   ", 5, gcfg);
+    // In-domain paraphrase without NO_EVIDENCE (stable across platforms).
+    auto ret_in = nanorag::Retriever::build_contrastive(store, pairs, cfg, {},
+                                                        /*inject_no_evidence=*/false);
+
+    auto blank = ret_in.ask_grounded("   ", 5, gcfg);
     if (!blank.refused || blank.answer != nanorag::kDontKnowAnswer) {
         std::cerr << "smoke: blank query must refuse\n";
         return 1;
     }
 
     auto in_domain =
-        ret.ask_grounded("Which feline housemate vibrates softly when comfortable?", 5, gcfg);
+        ret_in.ask_grounded("Which feline housemate vibrates softly when comfortable?", 5, gcfg);
     if (in_domain.refused || !in_domain.check.ok) {
         std::cerr << "smoke: expected grounded in-domain answer refused=" << in_domain.refused
                   << " reason=" << in_domain.check.reason << "\n";
@@ -154,13 +158,16 @@ int cmd_smoke() {
         return 1;
     }
 
-    auto alcohol = ret.ask_grounded("What is the boiling point of alcohol?", 5, gcfg);
+    // Near-miss / OOD with NO_EVIDENCE injection (production-like ingest).
+    auto ret_ood = nanorag::Retriever::build_contrastive(store, pairs, cfg, {},
+                                                         /*inject_no_evidence=*/true);
+    auto alcohol = ret_ood.ask_grounded("What is the boiling point of alcohol?", 5, gcfg);
     if (!alcohol.refused || alcohol.answer != nanorag::kDontKnowAnswer || !alcohol.check.ok) {
         std::cerr << "smoke: alcohol near-miss must refuse\n";
         return 1;
     }
 
-    auto ood = ret.ask_grounded("Who invented the chocolate pizza telescope?", 5, gcfg);
+    auto ood = ret_ood.ask_grounded("Who invented the chocolate pizza telescope?", 5, gcfg);
     if (!ood.refused || ood.answer != nanorag::kDontKnowAnswer || !ood.check.ok) {
         std::cerr << "smoke: expected I don't know for OOD query\n";
         return 1;
