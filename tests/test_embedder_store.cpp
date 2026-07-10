@@ -119,6 +119,10 @@ int main() {
         cfg.momentum = 0.9f;
         cfg.temperature = 0.05f;
         cfg.seed = 99;
+        cfg.hard_neg_k = 5;
+        cfg.hard_neg_start_epoch = 100;
+        cfg.hard_neg_loss_weight = 0.15f;
+        cfg.query_query_weight = 0.0f;
         // No NO_EVIDENCE injection: this suite measures paraphrase retrieval only.
         auto ret = nanorag::Retriever::build_contrastive(store, train, cfg, {},
                                                          /*inject_no_evidence=*/false);

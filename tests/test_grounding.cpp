@@ -155,9 +155,13 @@ int main() {
             {"At one atmosphere when does pure water become gas?", 30},
         };
         nanorag::ContrastiveTrainConfig tcfg;
-        tcfg.dim = 48;
-        tcfg.epochs = 200;
+        tcfg.dim = 64;
+        tcfg.epochs = 220;
         tcfg.seed = 7;
+        tcfg.hard_neg_k = 3;
+        tcfg.hard_neg_start_epoch = 60;
+        tcfg.hard_neg_loss_weight = 0.15f;
+        tcfg.query_query_weight = 0.0f;
         auto ret = nanorag::Retriever::build_contrastive(store, pairs, tcfg);
 
         nanorag::GroundingConfig gcfg = nanorag::default_grounding_config();

@@ -191,6 +191,10 @@ int main() {
         cfg.momentum = 0.9f;
         cfg.temperature = 0.05f;
         cfg.seed = 7;
+        cfg.hard_neg_k = 5;
+        cfg.hard_neg_start_epoch = 100;
+        cfg.hard_neg_loss_weight = 0.15f;
+        cfg.query_query_weight = 0.0f;
         auto primary = build_contrastive_from_paths(paths, cfg, /*inject_no_evidence=*/true);
 
         auto report = run_full_eval(primary, paths, default_grounding_config(),

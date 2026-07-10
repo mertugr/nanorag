@@ -229,15 +229,9 @@ inline std::shared_ptr<Embedder> load_embedder_for_index(const std::string& dir,
         if (emb->dim() != meta.dim) {
             throw std::runtime_error("load_embedder_for_index: contrastive dim mismatch");
         }
-        // Loaded object reports its format id; meta must match.
         if (emb->id() != meta.embedder_id) {
-            // Allow v1 file under either label if dimensions match.
-            if (!(meta.embedder_id == kContrastiveEmbedderIdV1 &&
-                  emb->id() == kContrastiveEmbedderIdV1) &&
-                !(meta.embedder_id == kContrastiveEmbedderId && emb->id() == kContrastiveEmbedderId)) {
-                throw std::runtime_error("load_embedder_for_index: contrastive id mismatch meta=" +
-                                         meta.embedder_id + " file=" + emb->id());
-            }
+            throw std::runtime_error("load_embedder_for_index: contrastive id mismatch meta=" +
+                                     meta.embedder_id + " file=" + emb->id());
         }
         return emb;
     }
@@ -294,29 +288,55 @@ public:
                 store.add({kNoEvidenceId, "system", kNoEvidenceText});
             }
             // Out-of-scope + realistic near-misses map to the sentinel.
+            // Oversample vs in-domain pairs so expanded synonym train does not drown refuse.
             const char* oods[] = {
                 "What is the boiling point of alcohol?",
                 "What is the boiling point of ethanol?",
                 "What is the boiling point of ethanol under one atmosphere?",
+                "What is the boiling temperature of rubbing alcohol?",
+                "At one atmosphere when does pure ethanol become gas?",
                 "What is the melting point of iron?",
+                "What is the melting point of pure iron metal?",
                 "What is the freezing point of mercury?",
+                "What kelvin mark freezes liquid mercury?",
                 "How many legs does a spider have?",
+                "How many legs does a typical spider have?",
                 "What is the capital of Germany?",
+                "What city is the capital of Germany?",
                 "Who is the president of France?",
                 "What is the population of Tokyo?",
                 "How tall is Mount Everest?",
                 "What is the speed of sound in air?",
+                "What is the speed of sound in dry air at sea level?",
                 "Which planet has the most moons in our solar system?",
                 "What is the chemical formula for methane?",
+                "What is the square root of negative seventeen as a real number recipe?",
                 "Who invented the chocolate pizza telescope in medieval France?",
                 "What is the stock price of completely fictional company Zyblerqux?",
                 "How many purple dragons live in my kitchen toaster?",
                 "Which dog breed is best at herding sheep?",
                 "What dog breed herds livestock best?",
                 "Which canine variety is famous for sheep herding trials?",
+                "What is the best sheep herding dog for alpine farms?",
             };
-            for (const char* q : oods) {
-                train_pairs.push_back({q, kNoEvidenceId});
+            // Aim for OOD mass ≈ in-domain mass (at least 2× the OOD template list).
+            const std::size_t in_domain = pairs.size();
+            const std::size_t n_ood_templates =
+                sizeof(oods) / sizeof(oods[0]);
+            int repeats = 2;
+            if (in_domain > n_ood_templates && n_ood_templates > 0) {
+                repeats = static_cast<int>((in_domain + n_ood_templates - 1) / n_ood_templates);
+                if (repeats < 2) {
+                    repeats = 2;
+                }
+                if (repeats > 6) {
+                    repeats = 6;
+                }
+            }
+            for (int r = 0; r < repeats; ++r) {
+                for (const char* q : oods) {
+                    train_pairs.push_back({q, kNoEvidenceId});
+                }
             }
         }
         auto emb = std::make_shared<ContrastiveEmbedder>(
