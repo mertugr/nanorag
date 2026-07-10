@@ -13,10 +13,8 @@ jobs:
       - name: Checkout (recursive submodules)
         uses: actions/checkout@v4
         with:
+          # Public submodules: tinyann + nanollm
           submodules: recursive
-          # Private nanollm submodule needs a token with repo scope when CI runs
-          # as a fork or without default GITHUB_TOKEN access to private deps.
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install toolchain
         run: |

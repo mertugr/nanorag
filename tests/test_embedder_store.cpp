@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -153,6 +154,94 @@ int main() {
             }
         }
         CHECK(hits2 == 6);
+
+        // --- Retriever::load fail-closed validation ---
+        {
+            const auto bad_kind = fs::temp_directory_path() / "nanorag_bad_kind";
+            fs::create_directories(bad_kind);
+            ret.save(bad_kind.string());
+            {
+                auto meta = nanorag::load_meta((bad_kind / "meta.txt").string());
+                meta.index_kind = "ivf";
+                nanorag::save_meta((bad_kind / "meta.txt").string(), meta);
+            }
+            bool threw = false;
+            try {
+                (void)nanorag::Retriever::open(bad_kind.string());
+            } catch (const std::exception& e) {
+                threw = true;
+                CHECK(std::string(e.what()).find("index_kind") != std::string::npos);
+            }
+            CHECK(threw);
+        }
+        {
+            const auto bad_metric = fs::temp_directory_path() / "nanorag_bad_metric";
+            fs::create_directories(bad_metric);
+            ret.save(bad_metric.string());
+            {
+                auto meta = nanorag::load_meta((bad_metric / "meta.txt").string());
+                meta.metric = "euclidean";
+                // save_meta rewrites version; validate_index_meta rejects non-cosine
+                nanorag::save_meta((bad_metric / "meta.txt").string(), meta);
+            }
+            bool threw = false;
+            try {
+                (void)nanorag::Retriever::open(bad_metric.string());
+            } catch (const std::exception& e) {
+                threw = true;
+                CHECK(std::string(e.what()).find("metric") != std::string::npos);
+            }
+            CHECK(threw);
+        }
+        {
+            const auto bad_n = fs::temp_directory_path() / "nanorag_bad_nchunks";
+            fs::create_directories(bad_n);
+            ret.save(bad_n.string());
+            // Bypass load_meta validation: write meta with wrong n_chunks but valid kind/metric
+            {
+                std::ofstream out((bad_n / "meta.txt").string());
+                out << "nanorag_index_meta_version=2\n";
+                out << "embedder_id=" << ret.embedder().id() << "\n";
+                out << "dim=" << ret.embedder().dim() << "\n";
+                out << "metric=cosine\n";
+                out << "index_kind=hnsw\n";
+                out << "n_chunks=" << (ret.size() + 99) << "\n";
+                out << "n_real_chunks=" << ret.real_size() << "\n";
+                out << "has_no_evidence=0\n";
+            }
+            bool threw = false;
+            try {
+                (void)nanorag::Retriever::open(bad_n.string());
+            } catch (const std::exception& e) {
+                threw = true;
+                CHECK(std::string(e.what()).find("n_chunks") != std::string::npos);
+            }
+            CHECK(threw);
+        }
+        {
+            const auto future = fs::temp_directory_path() / "nanorag_future_meta";
+            fs::create_directories(future);
+            ret.save(future.string());
+            {
+                std::ofstream out((future / "meta.txt").string());
+                out << "nanorag_index_meta_version=99\n";
+                out << "embedder_id=" << ret.embedder().id() << "\n";
+                out << "dim=" << ret.embedder().dim() << "\n";
+                out << "metric=cosine\n";
+                out << "index_kind=hnsw\n";
+                out << "n_chunks=" << ret.size() << "\n";
+                out << "n_real_chunks=" << ret.real_size() << "\n";
+                out << "has_no_evidence=0\n";
+            }
+            bool threw = false;
+            try {
+                (void)nanorag::Retriever::open(future.string());
+            } catch (const std::exception& e) {
+                threw = true;
+                CHECK(std::string(e.what()).find("version") != std::string::npos);
+            }
+            CHECK(threw);
+        }
     }
 
     // --- Word2Vec ablation: unsupervised co-occurrence is NOT enough for paraphrases ---

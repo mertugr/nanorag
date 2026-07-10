@@ -22,5 +22,5 @@ SOFTWARE.
 
 -------------------------------------------------------------------------------
 Third-party components (submodules):
-  - tinyann: see third_party/tinyann (MIT unless stated otherwise)
-  - nanollm: see third_party/nanollm (license TBD by that repository)
+  - tinyann: see third_party/tinyann (MIT)
+  - nanollm: see third_party/nanollm (MIT)
