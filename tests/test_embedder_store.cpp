@@ -1,6 +1,7 @@
 #include "nanorag/chunk_store.hpp"
 #include "nanorag/contrastive.hpp"
 #include "nanorag/embedder.hpp"
+#include "nanorag/hybrid.hpp"
 #include "nanorag/pipeline.hpp"
 #include "nanorag/text_util.hpp"
 #include "nanorag/word2vec.hpp"
@@ -67,6 +68,39 @@ int main() {
     {
         CHECK(nanorag::token_jaccard("aaa bbb", "aaa bbb") > 0.99);
         CHECK(nanorag::token_jaccard("aaa bbb", "ccc ddd") < 0.01);
+    }
+
+    // --- Sparse BM25 + hybrid fuse unit tests ---
+    {
+        nanorag::ChunkStore s;
+        s.add({1, "a", "hierarchical navigable small world graphs for nearest neighbor search"});
+        s.add({2, "b", "pure water freezes at two hundred seventy three kelvin under one atmosphere"});
+        s.add({3, "c", "completely unrelated purple telescope chocolate"});
+        nanorag::SparseBm25Index bm25(s);
+        auto hits = bm25.search("hierarchical navigable small world", 3);
+        CHECK(!hits.empty());
+        CHECK(hits[0].id == 1);
+        auto water = bm25.search("water freezes kelvin atmosphere", 3);
+        CHECK(!water.empty());
+        CHECK(water[0].id == 2);
+        // Zero-overlap query → max BM25 ~ 0 → adaptive hybrid uses dense
+        CHECK(bm25.max_score("zzzz qqqq xxxx") < 1e-3f);
+
+        std::vector<tinyann::SearchResult> dense = {{2, 0.9f}, {1, 0.5f}, {3, 0.1f}};
+        std::vector<tinyann::SearchResult> sparse = {{1, 5.0f}, {3, 1.0f}};
+        nanorag::HybridConfig hcfg;
+        hcfg.mode = nanorag::RetrieveMode::Hybrid;
+        hcfg.fusion = nanorag::HybridFusion::RRF;
+        nanorag::SparseBm25Index* bm_ptr = &bm25;
+        const std::string q = "hierarchical navigable small world";
+        auto fused =
+            nanorag::fuse_dense_sparse(dense, sparse, hcfg, 3, /*sparse_max=*/5.0f, bm_ptr, &q);
+        CHECK(!fused.empty());
+        CHECK(fused.size() >= 2);
+        // Adaptive: no sparse signal → dense ranking preserved
+        auto dens_only =
+            nanorag::fuse_dense_sparse(dense, sparse, hcfg, 3, /*sparse_max=*/0.f, bm_ptr, &q);
+        CHECK(dens_only[0].id == 2);
     }
 
     auto store = neutral_corpus();
@@ -154,6 +188,21 @@ int main() {
             }
         }
         CHECK(hits2 == 6);
+
+        // Hybrid default + dense mode: keyword query should stay strong under hybrid
+        {
+            ret.set_retrieve_mode(nanorag::RetrieveMode::Hybrid);
+            auto rh = ret.retrieve("hierarchical navigable small world C++ toolkit", 3);
+            CHECK(!rh.chunks.empty());
+            ret.set_retrieve_mode(nanorag::RetrieveMode::Dense);
+            auto rd = ret.retrieve("hierarchical navigable small world C++ toolkit", 3);
+            CHECK(!rd.chunks.empty());
+            ret.set_retrieve_mode(nanorag::RetrieveMode::Sparse);
+            auto rs = ret.retrieve("hierarchical navigable small world", 3);
+            CHECK(!rs.chunks.empty());
+            CHECK(rs.chunks[0].id == 3);  // tinyann chunk
+            ret.set_retrieve_mode(nanorag::RetrieveMode::Hybrid);
+        }
 
         // --- Retriever::load fail-closed validation ---
         {
@@ -245,6 +294,7 @@ int main() {
     }
 
     // --- Word2Vec ablation: unsupervised co-occurrence is NOT enough for paraphrases ---
+    // Use dense-only so hybrid BM25 doesn't mask weak embedders.
     {
         nanorag::Word2VecTrainConfig cfg;
         cfg.dim = 64;
@@ -252,6 +302,7 @@ int main() {
         cfg.doc_repeat = 24;
         cfg.seed = 99;
         auto ret = nanorag::Retriever::build_word2vec(store, cfg);
+        ret.set_retrieve_mode(nanorag::RetrieveMode::Dense);
         int hits = 0;
         for (const auto& p : kParaphrases) {
             auto r = ret.retrieve(p.q, 1);
@@ -269,6 +320,7 @@ int main() {
     {
         auto emb = std::make_shared<nanorag::HashingEmbedder>(128);
         auto ret = nanorag::Retriever::build(emb, store);
+        ret.set_retrieve_mode(nanorag::RetrieveMode::Dense);
         int hits = 0;
         for (const auto& p : kParaphrases) {
             auto r = ret.retrieve(p.q, 1);

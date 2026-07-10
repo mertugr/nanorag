@@ -4,6 +4,7 @@
 #include "nanorag/contrastive.hpp"
 #include "nanorag/embedder.hpp"
 #include "nanorag/grounding.hpp"
+#include "nanorag/hybrid.hpp"
 #include "nanorag/prompt.hpp"
 #include "nanorag/word2vec.hpp"
 
@@ -16,6 +17,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -252,8 +254,13 @@ struct RetrieveResult {
 
 class Retriever {
 public:
-    Retriever(std::shared_ptr<Embedder> embedder, ChunkStore store, tinyann::HnswIndex index)
-        : embedder_(std::move(embedder)), store_(std::move(store)), index_(std::move(index)) {
+    Retriever(std::shared_ptr<Embedder> embedder, ChunkStore store, tinyann::HnswIndex index,
+              HybridConfig hybrid = {})
+        : embedder_(std::move(embedder)),
+          store_(std::move(store)),
+          index_(std::move(index)),
+          sparse_(store_),
+          hybrid_(hybrid) {
         if (!embedder_) {
             throw std::invalid_argument("Retriever: null embedder");
         }
@@ -263,7 +270,7 @@ public:
     }
 
     static Retriever build(std::shared_ptr<Embedder> embedder, ChunkStore store,
-                           tinyann::HnswParams params = {}) {
+                           tinyann::HnswParams params = {}, HybridConfig hybrid = {}) {
         if (!embedder) {
             throw std::invalid_argument("Retriever::build: null embedder");
         }
@@ -271,7 +278,7 @@ public:
         for (const auto& c : store.all()) {
             index.add(c.id, embedder->embed(c.text));
         }
-        return Retriever(std::move(embedder), std::move(store), std::move(index));
+        return Retriever(std::move(embedder), std::move(store), std::move(index), hybrid);
     }
 
     static Retriever build_word2vec(ChunkStore store, Word2VecTrainConfig cfg = {},
@@ -324,9 +331,52 @@ public:
         return build(std::move(emb), std::move(store), params);
     }
 
-    RetrieveResult retrieve(const std::string& query, std::size_t k) const {
+    const HybridConfig& hybrid_config() const { return hybrid_; }
+    void set_hybrid_config(HybridConfig cfg) { hybrid_ = cfg; }
+    void set_retrieve_mode(RetrieveMode mode) { hybrid_.mode = mode; }
+    RetrieveMode retrieve_mode() const { return hybrid_.mode; }
+
+    /// Dense ANN only (ignores hybrid mode for this call).
+    std::vector<tinyann::SearchResult> search_dense(const std::string& query,
+                                                    std::size_t k) const {
         auto q = embedder_->embed(query);
-        auto hits = index_.search(q, k);
+        return index_.search(q, k);
+    }
+
+    /// Sparse BM25 only.
+    std::vector<tinyann::SearchResult> search_sparse(const std::string& query,
+                                                     std::size_t k) const {
+        return sparse_.search(query, k);
+    }
+
+    /// Retrieve with current HybridConfig (dense / sparse / hybrid).
+    RetrieveResult retrieve(const std::string& query, std::size_t k) const {
+        const std::size_t pool =
+            std::max(k, std::max(hybrid_.candidate_pool, static_cast<std::size_t>(1)));
+        std::vector<tinyann::SearchResult> hits;
+        if (hybrid_.mode == RetrieveMode::Dense) {
+            hits = search_dense(query, k);
+        } else if (hybrid_.mode == RetrieveMode::Sparse) {
+            hits = search_sparse(query, k);
+        } else {
+            auto dense = search_dense(query, pool);
+            auto sparse = search_sparse(query, pool);
+            const float sparse_max = sparse_.max_score(query);
+            hits = fuse_dense_sparse(dense, sparse, hybrid_, k, sparse_max, &sparse_, &query);
+            // Report dense cosine (when available) as the score used by the answerability
+            // gate. Hybrid fusion is only for *ranking*; inflating scores with BM25 made
+            // weak dense hits pass min_score_without_query_support and broke OOD refuse.
+            std::unordered_map<std::int64_t, float> dense_score;
+            for (const auto& h : dense) {
+                dense_score[h.id] = h.score;
+            }
+            for (auto& h : hits) {
+                auto it = dense_score.find(h.id);
+                if (it != dense_score.end()) {
+                    h.score = it->second;
+                }
+            }
+        }
         RetrieveResult r;
         r.chunks = hits_to_chunks(hits, store_);
         r.prompt = build_rag_prompt(query, r.chunks);
@@ -375,7 +425,8 @@ public:
         save_meta(dir + "/meta.txt", meta);
     }
 
-    static Retriever load(const std::string& dir, std::shared_ptr<Embedder> embedder) {
+    static Retriever load(const std::string& dir, std::shared_ptr<Embedder> embedder,
+                          HybridConfig hybrid = {}) {
         if (!embedder) {
             throw std::invalid_argument("Retriever::load: null embedder");
         }
@@ -395,17 +446,18 @@ public:
         if (index.dimension() != embedder->dim()) {
             throw std::runtime_error("Retriever::load: tann dim mismatch");
         }
-        return Retriever(std::move(embedder), std::move(store), std::move(index));
+        return Retriever(std::move(embedder), std::move(store), std::move(index), hybrid);
     }
 
-    static Retriever open(const std::string& dir) {
+    static Retriever open(const std::string& dir, HybridConfig hybrid = {}) {
         auto meta = load_meta(dir + "/meta.txt");
         auto emb = load_embedder_for_index(dir, meta);
-        return load(dir, std::move(emb));
+        return load(dir, std::move(emb), hybrid);
     }
 
     const ChunkStore& store() const { return store_; }
     const Embedder& embedder() const { return *embedder_; }
+    const SparseBm25Index& sparse_index() const { return sparse_; }
     std::size_t size() const { return store_.size(); }
     std::size_t real_size() const { return count_real_chunks(store_); }
 
@@ -413,6 +465,8 @@ private:
     std::shared_ptr<Embedder> embedder_;
     ChunkStore store_;
     tinyann::HnswIndex index_;
+    SparseBm25Index sparse_;
+    HybridConfig hybrid_;
 };
 
 }  // namespace nanorag
