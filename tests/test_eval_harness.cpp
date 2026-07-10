@@ -229,14 +229,23 @@ int main() {
 
         double hash_easy = -1, hash_hard = -1;
         for (const auto& a : report.ablations) {
-            if (a.name == "hashing-v1") {
+            if (a.name == "hashing-v1+dense" || a.name == "hashing-v1" ||
+                a.name.find("hashing-v1") == 0) {
                 hash_easy = a.retrieval_easy.recall_at_1;
                 hash_hard = a.retrieval_hard.recall_at_1;
+                if (a.name == "hashing-v1+dense") {
+                    break;
+                }
             }
         }
         CHECK(hash_easy >= 0);
         CHECK(hash_hard >= 0);
         CHECK(report.ablations.size() >= 3);
+        // Hybrid hard should not regress vs dense (adaptive / dense-primary).
+        if (report.primary_mode == "hybrid" && report.retrieval_hard_dense.n > 0) {
+            CHECK(report.retrieval_hard.recall_at_1 + 1e-9 >=
+                  report.retrieval_hard_dense.recall_at_1 - 1e-9);
+        }
         // Document honesty: if hard R@1 is perfect, something is likely leaking keywords
         if (report.retrieval_hard.recall_at_1 > 0.99 + 1e-9) {
             std::cerr << "WARN: hard R@1 is 1.0 — verify zero-keyword still holds "

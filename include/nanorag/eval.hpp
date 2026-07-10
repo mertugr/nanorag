@@ -593,14 +593,22 @@ struct AblationRow {
 
 struct EvalReport {
     /// Lexical-friendly held-out paraphrases (may share gold keywords). Smoke only.
+    /// Primary row uses the retriever's current retrieve mode (default hybrid).
     RetrievalMetrics retrieval_easy;
     /// Zero content-token overlap with gold — honest semantic retrieval measure.
     RetrievalMetrics retrieval_hard;
+    /// Dense-only baseline on the same embedder (for hybrid A/B).
+    RetrievalMetrics retrieval_easy_dense;
+    RetrievalMetrics retrieval_hard_dense;
+    /// Sparse BM25-only baseline.
+    RetrievalMetrics retrieval_easy_sparse;
+    RetrievalMetrics retrieval_hard_sparse;
     RefuseMetrics refuse;
     GroundingMetrics grounding;
     std::vector<AblationRow> ablations;
     bool disjoint_ok = false;
     bool hard_zero_keyword_ok = false;
+    std::string primary_mode = "hybrid";
 };
 
 struct EvalPaths {
@@ -637,7 +645,7 @@ inline Retriever build_contrastive_from_paths(const EvalPaths& paths,
     return Retriever::build_contrastive(store, pairs, cfg, {}, inject_no_evidence);
 }
 
-inline EvalReport run_full_eval(const Retriever& primary, const EvalPaths& paths,
+inline EvalReport run_full_eval(Retriever primary, const EvalPaths& paths,
                                 const GroundingConfig& gcfg = default_grounding_config(),
                                 bool run_ablations = true) {
     auto train = load_train_query_set(paths.train_pairs);
@@ -669,22 +677,50 @@ inline EvalReport run_full_eval(const Retriever& primary, const EvalPaths& paths
     EvalReport rep;
     rep.disjoint_ok = true;
     rep.hard_zero_keyword_ok = true;
-    rep.retrieval_easy = eval_retrieval(primary, easy, 5);
-    rep.retrieval_hard = eval_retrieval(primary, hard, 5);
+    rep.primary_mode = retrieve_mode_name(primary.retrieve_mode());
+
+    // Dense / sparse baselines on the same embedder+corpus (A/B for hybrid).
+    {
+        auto mode_saved = primary.retrieve_mode();
+        primary.set_retrieve_mode(RetrieveMode::Dense);
+        rep.retrieval_easy_dense = eval_retrieval(primary, easy, 5);
+        rep.retrieval_hard_dense = eval_retrieval(primary, hard, 5);
+        primary.set_retrieve_mode(RetrieveMode::Sparse);
+        rep.retrieval_easy_sparse = eval_retrieval(primary, easy, 5);
+        rep.retrieval_hard_sparse = eval_retrieval(primary, hard, 5);
+        // Primary metrics: hybrid (or whatever mode was requested).
+        primary.set_retrieve_mode(mode_saved);
+        if (mode_saved == RetrieveMode::Dense) {
+            rep.retrieval_easy = rep.retrieval_easy_dense;
+            rep.retrieval_hard = rep.retrieval_hard_dense;
+        } else if (mode_saved == RetrieveMode::Sparse) {
+            rep.retrieval_easy = rep.retrieval_easy_sparse;
+            rep.retrieval_hard = rep.retrieval_hard_sparse;
+        } else {
+            rep.retrieval_easy = eval_retrieval(primary, easy, 5);
+            rep.retrieval_hard = eval_retrieval(primary, hard, 5);
+        }
+    }
     rep.refuse = eval_refuse(primary, refuse, gcfg);
     // Grounding uses easy set (lexical support path); hard is retrieval-only for now.
     rep.grounding = eval_grounding(primary, easy, gcfg);
 
     if (run_ablations) {
-        // Hashing
+        // Hashing (hybrid default on the retriever)
         {
             auto emb = std::make_shared<HashingEmbedder>(128);
             auto ret = Retriever::build(emb, store);
             AblationRow row;
-            row.name = "hashing-v1";
+            row.name = "hashing-v1+hybrid";
             row.retrieval_easy = eval_retrieval(ret, easy, 5);
             row.retrieval_hard = eval_retrieval(ret, hard, 5);
             rep.ablations.push_back(std::move(row));
+            ret.set_retrieve_mode(RetrieveMode::Dense);
+            AblationRow row_d;
+            row_d.name = "hashing-v1+dense";
+            row_d.retrieval_easy = eval_retrieval(ret, easy, 5);
+            row_d.retrieval_hard = eval_retrieval(ret, hard, 5);
+            rep.ablations.push_back(std::move(row_d));
         }
         // Word2Vec
         {
@@ -695,18 +731,28 @@ inline EvalReport run_full_eval(const Retriever& primary, const EvalPaths& paths
             wcfg.seed = 42;
             auto ret = Retriever::build_word2vec(store, wcfg);
             AblationRow row;
-            row.name = "word2vec-v1";
+            row.name = "word2vec-v1+hybrid";
             row.retrieval_easy = eval_retrieval(ret, easy, 5);
             row.retrieval_hard = eval_retrieval(ret, hard, 5);
             rep.ablations.push_back(std::move(row));
         }
-        // Contrastive row (primary expected to be contrastive-v2)
+        // Contrastive primary rows
         {
             AblationRow row;
-            row.name = primary.embedder().id();
+            row.name = std::string(primary.embedder().id()) + "+" + rep.primary_mode;
             row.retrieval_easy = rep.retrieval_easy;
             row.retrieval_hard = rep.retrieval_hard;
             rep.ablations.push_back(std::move(row));
+            AblationRow row_d;
+            row_d.name = std::string(primary.embedder().id()) + "+dense";
+            row_d.retrieval_easy = rep.retrieval_easy_dense;
+            row_d.retrieval_hard = rep.retrieval_hard_dense;
+            rep.ablations.push_back(std::move(row_d));
+            AblationRow row_s;
+            row_s.name = std::string(primary.embedder().id()) + "+sparse";
+            row_s.retrieval_easy = rep.retrieval_easy_sparse;
+            row_s.retrieval_hard = rep.retrieval_hard_sparse;
+            rep.ablations.push_back(std::move(row_s));
         }
     }
     return rep;
@@ -716,19 +762,21 @@ inline std::string format_report(const EvalReport& r) {
     std::ostringstream oss;
     oss << "=== nanorag eval report ===\n";
     oss << "disjoint_ok=" << (r.disjoint_ok ? "true" : "false")
-        << " hard_zero_keyword_ok=" << (r.hard_zero_keyword_ok ? "true" : "false") << "\n";
-    oss << "[retrieval_easy] n=" << r.retrieval_easy.n
-        << " R@1=" << r.retrieval_easy.recall_at_1
-        << " R@3=" << r.retrieval_easy.recall_at_3
-        << " R@5=" << r.retrieval_easy.recall_at_5
-        << " MRR=" << r.retrieval_easy.mrr
-        << "  # may share gold keywords — NOT semantic quality\n";
-    oss << "[retrieval_hard] n=" << r.retrieval_hard.n
-        << " R@1=" << r.retrieval_hard.recall_at_1
-        << " R@3=" << r.retrieval_hard.recall_at_3
-        << " R@5=" << r.retrieval_hard.recall_at_5
-        << " MRR=" << r.retrieval_hard.mrr
-        << "  # zero content-token overlap with gold — honest R@k/MRR\n";
+        << " hard_zero_keyword_ok=" << (r.hard_zero_keyword_ok ? "true" : "false")
+        << " primary_mode=" << r.primary_mode << "\n";
+    auto line = [&](const char* tag, const RetrievalMetrics& m, const char* note) {
+        oss << tag << " n=" << m.n << " R@1=" << m.recall_at_1 << " R@3=" << m.recall_at_3
+            << " R@5=" << m.recall_at_5 << " MRR=" << m.mrr << "  # " << note << "\n";
+    };
+    line("[retrieval_easy primary]", r.retrieval_easy,
+         "primary mode; may share gold keywords — smoke");
+    line("[retrieval_easy dense]", r.retrieval_easy_dense, "ANN only");
+    line("[retrieval_easy sparse]", r.retrieval_easy_sparse, "BM25 only");
+    line("[retrieval_hard primary]", r.retrieval_hard,
+         "zero content-token overlap with gold — honest");
+    line("[retrieval_hard dense]", r.retrieval_hard_dense, "ANN only");
+    line("[retrieval_hard sparse]", r.retrieval_hard_sparse,
+         "BM25 only (expect ~0 on hard by construction)");
     oss << "[refuse] n=" << r.refuse.n
         << " idk_rate=" << r.refuse.idk_rate
         << " empty_used=" << r.refuse.empty_used_rate
@@ -823,14 +871,27 @@ inline std::string check_gates(const EvalReport& r, const QualityGates& g = {}) 
     }
     if (g.require_contrastive_beats_hashing_easy) {
         double h_r1 = -1;
-        double c_r1 = r.retrieval_easy.recall_at_1;
+        // Prefer dense hashing baseline; fall back to any hashing ablation.
         for (const auto& a : r.ablations) {
-            if (a.name == "hashing-v1") {
+            if (a.name == "hashing-v1+dense" || a.name == "hashing-v1" ||
+                a.name.find("hashing-v1") == 0) {
                 h_r1 = a.retrieval_easy.recall_at_1;
+                if (a.name == "hashing-v1+dense") {
+                    break;
+                }
             }
         }
+        // Compare against dense contrastive (not hybrid) when available.
+        const double c_r1 = r.retrieval_easy_dense.n > 0 ? r.retrieval_easy_dense.recall_at_1
+                                                         : r.retrieval_easy.recall_at_1;
         if (h_r1 >= 0 && c_r1 + 1e-9 < h_r1) {
             fail("contrastive easy R@1 should be >= hashing easy R@1");
+        }
+    }
+    // Adaptive hybrid must not tank hard vs dense (sparse noise protection).
+    if (r.retrieval_hard_dense.n > 0 && r.primary_mode == "hybrid") {
+        if (r.retrieval_hard.recall_at_1 + 1e-9 < r.retrieval_hard_dense.recall_at_1 - 1e-9) {
+            fail("hybrid hard R@1 must be >= dense hard R@1 (adaptive sparse fallback)");
         }
     }
     if (fails == 0) {

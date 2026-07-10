@@ -5,6 +5,7 @@
 #include "nanorag/embedder.hpp"
 #include "nanorag/eval.hpp"
 #include "nanorag/grounding.hpp"
+#include "nanorag/hybrid.hpp"
 #include "nanorag/pipeline.hpp"
 #include "nanorag/prompt.hpp"
 #include "nanorag/text_util.hpp"
@@ -36,12 +37,15 @@ void usage(const char* argv0) {
         << "         [--embedder contrastive|word2vec|hashing]\n"
         << "         [--pairs <train_pairs.tsv>] [--dim N] [--epochs N]\n"
         << "  " << argv0 << " ask --index <dir> --query <text> [--k N]\n"
+        << "         [--retrieve dense|sparse|hybrid]  (default hybrid)\n"
         << "         [--min-score F] [--mode extractive|generate]\n"
         << "         [--model <file.nanollm> --tokenizer <file.nllmtok>] [--max-tokens N]\n"
         << "  " << argv0 << " eval-paraphrase --index <dir> --pairs <eval.tsv> [--max-jaccard F]\n"
+        << "         [--retrieve dense|sparse|hybrid]\n"
         << "  " << argv0 << " eval-grounding --index <dir> --pairs <eval.tsv>\n"
-        << "         [--ood-query <text>]... [--min-score F]\n"
-        << "  " << argv0 << " eval-suite --data data/demo [--no-ablations]\n";
+        << "         [--ood-query <text>]... [--min-score F] [--retrieve dense|sparse|hybrid]\n"
+        << "  " << argv0 << " eval-suite --data data/demo [--no-ablations]\n"
+        << "         [--retrieve dense|sparse|hybrid]  (default hybrid; report includes A/B)\n";
 }
 
 std::string require_arg(int& i, int argc, char** argv, const char* flag) {
@@ -228,13 +232,16 @@ int cmd_ingest(const std::string& chunks_path, const std::string& out_dir, std::
 
 int cmd_ask(const std::string& index_dir, const std::string& query, std::size_t k, float min_score,
             const std::string& mode, const std::string& model_path, const std::string& tok_path,
-            int max_tokens) {
-    auto retriever = nanorag::Retriever::open(index_dir);
+            int max_tokens, nanorag::RetrieveMode retrieve_mode) {
+    nanorag::HybridConfig hcfg;
+    hcfg.mode = retrieve_mode;
+    auto retriever = nanorag::Retriever::open(index_dir, hcfg);
     auto gcfg = nanorag::default_grounding_config();
     gcfg.min_score = min_score;
 
     const std::size_t fetch = std::max(k, gcfg.max_context_chunks * 3);
     auto retrieved = retriever.retrieve(query, fetch);
+    std::cout << "retrieve_mode=" << nanorag::retrieve_mode_name(retrieve_mode) << "\n";
 
     nanorag::GroundedAnswer ga;
     if (mode == "extractive" || model_path.empty()) {
@@ -273,8 +280,10 @@ int cmd_ask(const std::string& index_dir, const std::string& query, std::size_t 
 }
 
 int cmd_eval_paraphrase(const std::string& index_dir, const std::string& pairs_path,
-                        double max_jaccard) {
-    auto retriever = nanorag::Retriever::open(index_dir);
+                        double max_jaccard, nanorag::RetrieveMode retrieve_mode) {
+    nanorag::HybridConfig hcfg;
+    hcfg.mode = retrieve_mode;
+    auto retriever = nanorag::Retriever::open(index_dir, hcfg);
     auto pairs = load_eval_pairs(pairs_path);
     int ok = 0;
     int n = 0;
@@ -300,8 +309,11 @@ int cmd_eval_paraphrase(const std::string& index_dir, const std::string& pairs_p
 }
 
 int cmd_eval_grounding(const std::string& index_dir, const std::string& pairs_path,
-                       const std::vector<std::string>& ood_queries, float min_score) {
-    auto retriever = nanorag::Retriever::open(index_dir);
+                       const std::vector<std::string>& ood_queries, float min_score,
+                       nanorag::RetrieveMode retrieve_mode) {
+    nanorag::HybridConfig hcfg;
+    hcfg.mode = retrieve_mode;
+    auto retriever = nanorag::Retriever::open(index_dir, hcfg);
     auto gcfg = nanorag::default_grounding_config();
     gcfg.min_score = min_score;
 
@@ -396,7 +408,8 @@ int cmd_eval_grounding(const std::string& index_dir, const std::string& pairs_pa
 }
 
 
-int cmd_eval_suite(const std::string& data_root, bool ablations) {
+int cmd_eval_suite(const std::string& data_root, bool ablations,
+                   nanorag::RetrieveMode retrieve_mode) {
     auto paths = nanorag::eval::default_demo_paths(data_root);
     nanorag::ContrastiveTrainConfig cfg;
     cfg.dim = 128;
@@ -406,8 +419,9 @@ int cmd_eval_suite(const std::string& data_root, bool ablations) {
     cfg.temperature = 0.05f;
     cfg.seed = 7;
     auto primary = nanorag::eval::build_contrastive_from_paths(paths, cfg, true);
-    auto report = nanorag::eval::run_full_eval(primary, paths, nanorag::default_grounding_config(),
-                                               ablations);
+    primary.set_retrieve_mode(retrieve_mode);
+    auto report = nanorag::eval::run_full_eval(std::move(primary), paths,
+                                               nanorag::default_grounding_config(), ablations);
     std::cout << nanorag::eval::format_report(report);
     const std::string err = nanorag::eval::check_gates(report);
     if (!err.empty()) {
@@ -463,6 +477,7 @@ int main(int argc, char** argv) {
             std::size_t k = 5;
             float min_score = nanorag::default_grounding_config().min_score;
             int max_tokens = 64;
+            nanorag::RetrieveMode retrieve_mode = nanorag::RetrieveMode::Hybrid;
             for (int i = 2; i < argc; ++i) {
                 const std::string a = argv[i];
                 if (a == "--index") {
@@ -475,6 +490,8 @@ int main(int argc, char** argv) {
                     min_score = std::stof(require_arg(i, argc, argv, "--min-score"));
                 } else if (a == "--mode") {
                     mode = require_arg(i, argc, argv, "--mode");
+                } else if (a == "--retrieve") {
+                    retrieve_mode = nanorag::parse_retrieve_mode(require_arg(i, argc, argv, "--retrieve"));
                 } else if (a == "--model") {
                     model = require_arg(i, argc, argv, "--model");
                     if (mode == "extractive") {
@@ -504,11 +521,12 @@ int main(int argc, char** argv) {
             if (!has_query) {
                 throw std::runtime_error("ask requires --query");
             }
-            return cmd_ask(index, query, k, min_score, mode, model, tok, max_tokens);
+            return cmd_ask(index, query, k, min_score, mode, model, tok, max_tokens, retrieve_mode);
         }
         if (cmd == "eval-paraphrase") {
             std::string index, pairs;
             double max_j = 0.30;
+            nanorag::RetrieveMode retrieve_mode = nanorag::RetrieveMode::Hybrid;
             for (int i = 2; i < argc; ++i) {
                 const std::string a = argv[i];
                 if (a == "--index") {
@@ -517,6 +535,8 @@ int main(int argc, char** argv) {
                     pairs = require_arg(i, argc, argv, "--pairs");
                 } else if (a == "--max-jaccard") {
                     max_j = std::stod(require_arg(i, argc, argv, "--max-jaccard"));
+                } else if (a == "--retrieve") {
+                    retrieve_mode = nanorag::parse_retrieve_mode(require_arg(i, argc, argv, "--retrieve"));
                 } else {
                     throw std::runtime_error("unknown arg: " + a);
                 }
@@ -524,27 +544,31 @@ int main(int argc, char** argv) {
             if (index.empty() || pairs.empty()) {
                 throw std::runtime_error("eval-paraphrase requires --index and --pairs");
             }
-            return cmd_eval_paraphrase(index, pairs, max_j);
+            return cmd_eval_paraphrase(index, pairs, max_j, retrieve_mode);
         }
         if (cmd == "eval-suite") {
             std::string data = "data/demo";
             bool ablations = true;
+            nanorag::RetrieveMode retrieve_mode = nanorag::RetrieveMode::Hybrid;
             for (int i = 2; i < argc; ++i) {
                 const std::string a = argv[i];
                 if (a == "--data") {
                     data = require_arg(i, argc, argv, "--data");
                 } else if (a == "--no-ablations") {
                     ablations = false;
+                } else if (a == "--retrieve") {
+                    retrieve_mode = nanorag::parse_retrieve_mode(require_arg(i, argc, argv, "--retrieve"));
                 } else {
                     throw std::runtime_error("unknown arg: " + a);
                 }
             }
-            return cmd_eval_suite(data, ablations);
+            return cmd_eval_suite(data, ablations, retrieve_mode);
         }
         if (cmd == "eval-grounding") {
             std::string index, pairs;
             float min_score = nanorag::default_grounding_config().min_score;
             std::vector<std::string> oods;
+            nanorag::RetrieveMode retrieve_mode = nanorag::RetrieveMode::Hybrid;
             for (int i = 2; i < argc; ++i) {
                 const std::string a = argv[i];
                 if (a == "--index") {
@@ -555,6 +579,8 @@ int main(int argc, char** argv) {
                     min_score = std::stof(require_arg(i, argc, argv, "--min-score"));
                 } else if (a == "--ood-query") {
                     oods.push_back(require_arg(i, argc, argv, "--ood-query"));
+                } else if (a == "--retrieve") {
+                    retrieve_mode = nanorag::parse_retrieve_mode(require_arg(i, argc, argv, "--retrieve"));
                 } else {
                     throw std::runtime_error("unknown arg: " + a);
                 }
@@ -562,7 +588,7 @@ int main(int argc, char** argv) {
             if (index.empty()) {
                 throw std::runtime_error("eval-grounding requires --index");
             }
-            return cmd_eval_grounding(index, pairs, oods, min_score);
+            return cmd_eval_grounding(index, pairs, oods, min_score, retrieve_mode);
         }
         usage(argv[0]);
         return 2;

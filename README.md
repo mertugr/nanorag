@@ -18,13 +18,16 @@ No Hugging Face or third-party ML runtimes on the default path.
 
 ```
 chunks (+ train pairs)
-    → embedder (contrastive-v1 default)
-    → tinyann HNSW index
-query → retrieve → answerability gate
+    → embedder (contrastive-v2 default)
+    → tinyann HNSW index  +  in-memory BM25 (sparse)
+query → retrieve (hybrid dense-primary by default)
+      → answerability gate
     → refuse: "I don't know"
     → else: extractive evidence + [#id] citations
 optional nanollm generate (validated; falls back if ungrounded)
 ```
+
+**Retrieval modes** (`--retrieve dense|sparse|hybrid`, default **hybrid**): dense ANN, BM25, or dense-primary fusion with adaptive BM25 boost. See [docs/HYBRID_RETRIEVAL.md](docs/HYBRID_RETRIEVAL.md) for before/after eval and where hybrid helps vs not.
 
 ### Embedders
 
@@ -107,12 +110,12 @@ See [COMPATIBILITY.md](COMPATIBILITY.md) for version matrix and format versions.
   --out index/demo \
   --embedder contrastive --dim 64 --epochs 200
 
-./build/nanorag ask --index index/demo -q "…" [--min-score 0.25]
+./build/nanorag ask --index index/demo -q "…" [--min-score 0.25] [--retrieve hybrid]
 ./build/nanorag ask --index index/demo -q "…" --mode generate \
   --model m.nanollm --tokenizer t.nllmtok
 
-./build/nanorag eval-suite --data data/demo
-# Phase 2: R@k/MRR + refuse IDK + grounding + ablations + quality gates
+./build/nanorag eval-suite --data data/demo [--retrieve hybrid]
+# Phase 2: R@k/MRR (dense/sparse/hybrid A/B) + refuse + grounding + ablations
 
 ./build/nanorag eval-paraphrase --index index/demo \
   --pairs data/demo/eval_paraphrase.tsv
@@ -206,9 +209,8 @@ See `data/demo/eval/README.md`.
 1. **Phase 0** — scaffold + contrastive + grounding (**sealed**)
 2. **Phase 1** — hybrid submodules + install/export, CI, VERSION, LICENSE (**done** / Milestone 0 hygiene)
 3. **Phase 2** — eval foundation: labeled sets, R@k/MRR, refuse, grounding, ablations
-4. **Phase 2+** — retrieval quality lift, stronger embedders, hybrid lexical+dense
+4. **Phase 2+** — hybrid dense+BM25 retrieval (**this**); stronger embedders next
 5. **Later** — generate/chat parity with nanollm, incremental index, HTTP serve
-
 ## License
 
 MIT for **nanorag** — see [LICENSE](LICENSE).  
