@@ -67,7 +67,7 @@ Extractive mode is **evidence quoting**, not abstractive QA. Free-form generatio
 ```bash
 git clone --recurse-submodules https://github.com/mertugr/nanorag.git
 cd nanorag
-# nanollm is private — auth required for that submodule
+# Submodules are public: github.com/mertugr/tinyann and github.com/mertugr/nanollm
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DNANORAG_USE_SUBMODULES=ON
 cmake --build build -j
@@ -195,20 +195,24 @@ See `data/demo/eval/README.md`.
 
 - Bag-of-words mean embeddings — not a large dual encoder
 - Quality needs good train pairs and near-miss OOD pairs
-- Host-endian binary formats (same class as tinyann)
+- **Host-endian** binary formats (`*.tann`, `.nctr`, `.nw2v`) — same machine endianness required (no endian marker)
 - Single-threaded; no server yet
-- License TBD (align with tinyann / nanollm before public release)
+- Honest hard retrieval is still weak (see eval hard R@k) — not production dual-encoder quality
 
 ---
 
 ## Roadmap
 
 1. **Phase 0** — scaffold + contrastive + grounding (**sealed**)
-2. **Phase 1** — hybrid submodules + install/export, CI, VERSION, LICENSE
-3. **Phase 2** — eval foundation (this PR): labeled sets, R@k/MRR, refuse, grounding, ablations
+2. **Phase 1** — hybrid submodules + install/export, CI, VERSION, LICENSE (**done** / Milestone 0 hygiene)
+3. **Phase 2** — eval foundation: labeled sets, R@k/MRR, refuse, grounding, ablations
 4. **Phase 2+** — retrieval quality lift, stronger embedders, hybrid lexical+dense
+5. **Later** — generate/chat parity with nanollm, incremental index, HTTP serve
 
 ## License
 
-MIT for **nanorag** sources — see [LICENSE](LICENSE).  
-Submodules: **tinyann** (MIT); **nanollm** (see that repo; may still be TBD).
+MIT for **nanorag** — see [LICENSE](LICENSE).  
+Submodules (also MIT, public):
+
+- [tinyann](https://github.com/mertugr/tinyann) — MIT
+- [nanollm](https://github.com/mertugr/nanollm) — MIT

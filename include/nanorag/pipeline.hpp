@@ -21,7 +21,14 @@
 
 namespace nanorag {
 
+/// Current index meta.txt schema version written by `save_meta`.
+inline constexpr int kIndexMetaVersion = 2;
+/// Oldest meta version still accepted by `load_meta` / `Retriever::load`.
+inline constexpr int kIndexMetaVersionMin = 1;
+
 struct IndexMeta {
+    /// Schema version from meta.txt (`nanorag_index_meta_version`). 0 = missing (legacy).
+    int meta_version = 0;
     std::string embedder_id;
     std::size_t dim = 0;
     std::string metric = "cosine";
@@ -44,12 +51,106 @@ inline std::size_t count_real_chunks(const ChunkStore& store) {
     return n;
 }
 
+inline std::string to_lower_ascii(std::string s) {
+    for (char& c : s) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return s;
+}
+
+/// Map meta metric string to tinyann::Metric. Throws if unsupported.
+inline tinyann::Metric parse_index_metric(const std::string& metric) {
+    const std::string m = to_lower_ascii(metric);
+    if (m == "cosine") {
+        return tinyann::Metric::Cosine;
+    }
+    if (m == "euclidean" || m == "l2") {
+        return tinyann::Metric::Euclidean;
+    }
+    if (m == "inner_product" || m == "ip" || m == "dot") {
+        return tinyann::Metric::InnerProduct;
+    }
+    throw std::runtime_error("unsupported index metric '" + metric +
+                             "' (expected cosine|euclidean|inner_product)");
+}
+
+/// Fail-closed checks on meta fields alone (before loading binaries).
+inline void validate_index_meta(const IndexMeta& m) {
+    if (m.dim == 0 || m.embedder_id.empty()) {
+        throw std::runtime_error("validate_index_meta: incomplete meta (need dim and embedder_id)");
+    }
+    if (m.meta_version > 0 && m.meta_version < kIndexMetaVersionMin) {
+        throw std::runtime_error("validate_index_meta: meta version " + std::to_string(m.meta_version) +
+                                 " is too old (min " + std::to_string(kIndexMetaVersionMin) + ")");
+    }
+    if (m.meta_version > kIndexMetaVersion) {
+        throw std::runtime_error("validate_index_meta: meta version " + std::to_string(m.meta_version) +
+                                 " is newer than supported " + std::to_string(kIndexMetaVersion) +
+                                 " (upgrade nanorag)");
+    }
+    // This release only builds HNSW + cosine indexes.
+    const std::string kind = to_lower_ascii(m.index_kind);
+    if (kind != "hnsw") {
+        throw std::runtime_error("validate_index_meta: unsupported index_kind '" + m.index_kind +
+                                 "' (only hnsw is supported)");
+    }
+    const std::string metric = to_lower_ascii(m.metric);
+    if (metric != "cosine") {
+        throw std::runtime_error("validate_index_meta: unsupported metric '" + m.metric +
+                                 "' (only cosine is supported)");
+    }
+    (void)parse_index_metric(m.metric);  // keep parser in sync with supported set
+    if (m.has_no_evidence != 0 && m.has_no_evidence != 1) {
+        throw std::runtime_error("validate_index_meta: has_no_evidence must be 0 or 1");
+    }
+}
+
+/// Cross-check store + HNSW against meta after load. Fail closed on mismatch.
+inline void validate_loaded_index(const IndexMeta& meta, const ChunkStore& store,
+                                  const tinyann::HnswIndex& index) {
+    validate_index_meta(meta);
+
+    if (index.dimension() != meta.dim) {
+        throw std::runtime_error("validate_loaded_index: tann dim " + std::to_string(index.dimension()) +
+                                 " != meta dim " + std::to_string(meta.dim));
+    }
+    if (index.metric() != tinyann::Metric::Cosine) {
+        throw std::runtime_error(
+            "validate_loaded_index: tann metric is not cosine (index file/meta mismatch)");
+    }
+    if (meta.n_chunks > 0 && store.size() != meta.n_chunks) {
+        throw std::runtime_error("validate_loaded_index: store size " + std::to_string(store.size()) +
+                                 " != meta n_chunks " + std::to_string(meta.n_chunks));
+    }
+    if (index.size() != store.size()) {
+        throw std::runtime_error("validate_loaded_index: index vector count " +
+                                 std::to_string(index.size()) + " != store size " +
+                                 std::to_string(store.size()));
+    }
+    const std::size_t real = count_real_chunks(store);
+    if (meta.n_real_chunks > 0 && real != meta.n_real_chunks) {
+        throw std::runtime_error("validate_loaded_index: real chunk count " + std::to_string(real) +
+                                 " != meta n_real_chunks " + std::to_string(meta.n_real_chunks));
+    }
+    const bool has_ne = store.contains(kNoEvidenceId);
+    if (meta.has_no_evidence == 1 && !has_ne) {
+        throw std::runtime_error(
+            "validate_loaded_index: meta has_no_evidence=1 but store has no id=-1 sentinel");
+    }
+    if (meta.has_no_evidence == 0 && has_ne) {
+        throw std::runtime_error(
+            "validate_loaded_index: store has NO_EVIDENCE sentinel but meta has_no_evidence=0");
+    }
+}
+
 inline void save_meta(const std::string& path, const IndexMeta& m) {
     std::ofstream out(path);
     if (!out) {
         throw std::runtime_error("save_meta: cannot open " + path);
     }
-    out << "nanorag_index_meta_version=2\n";
+    out << "nanorag_index_meta_version=" << kIndexMetaVersion << "\n";
     out << "embedder_id=" << m.embedder_id << "\n";
     out << "dim=" << m.dim << "\n";
     out << "metric=" << m.metric << "\n";
@@ -76,7 +177,9 @@ inline IndexMeta load_meta(const std::string& path) {
         }
         const std::string key = line.substr(0, eq);
         const std::string val = line.substr(eq + 1);
-        if (key == "embedder_id") {
+        if (key == "nanorag_index_meta_version") {
+            m.meta_version = std::stoi(val);
+        } else if (key == "embedder_id") {
             m.embedder_id = val;
         } else if (key == "dim") {
             m.dim = static_cast<std::size_t>(std::stoull(val));
@@ -95,10 +198,15 @@ inline IndexMeta load_meta(const std::string& path) {
     if (m.dim == 0 || m.embedder_id.empty()) {
         throw std::runtime_error("load_meta: incomplete meta in " + path);
     }
+    // Legacy files without version field: treat as v1 if missing n_real_chunks semantics.
+    if (m.meta_version == 0) {
+        m.meta_version = (m.n_real_chunks > 0 || m.has_no_evidence != 0) ? 2 : 1;
+    }
     // Backward compat for v1 meta (no n_real_chunks).
     if (m.n_real_chunks == 0 && m.n_chunks > 0) {
         m.n_real_chunks = m.has_no_evidence ? (m.n_chunks > 0 ? m.n_chunks - 1 : 0) : m.n_chunks;
     }
+    validate_index_meta(m);
     return m;
 }
 
@@ -271,16 +379,19 @@ public:
         if (!embedder) {
             throw std::invalid_argument("Retriever::load: null embedder");
         }
-        auto meta = load_meta(dir + "/meta.txt");
+        auto meta = load_meta(dir + "/meta.txt");  // validates kind/metric/version
         if (meta.embedder_id != embedder->id()) {
             throw std::runtime_error("Retriever::load: embedder_id mismatch: index has '" +
                                      meta.embedder_id + "', got '" + embedder->id() + "'");
         }
         if (meta.dim != embedder->dim()) {
-            throw std::runtime_error("Retriever::load: dim mismatch");
+            throw std::runtime_error("Retriever::load: dim mismatch: meta=" +
+                                     std::to_string(meta.dim) + " embedder=" +
+                                     std::to_string(embedder->dim()));
         }
         auto store = ChunkStore::load(dir + "/chunks.tsv");
         auto index = tinyann::HnswIndex::load(dir + "/vectors.hnsw.tann");
+        validate_loaded_index(meta, store, index);
         if (index.dimension() != embedder->dim()) {
             throw std::runtime_error("Retriever::load: tann dim mismatch");
         }
