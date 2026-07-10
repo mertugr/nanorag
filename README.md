@@ -104,6 +104,10 @@ See [COMPATIBILITY.md](COMPATIBILITY.md) for version matrix and format versions.
 ```bash
 ./build/nanorag smoke
 
+# Optional: build chunks.tsv from raw docs
+./build/nanorag chunk --input docs/ --out data/my_chunks.tsv \
+  --strategy markdown --max-chars 800 --overlap 100
+
 ./build/nanorag ingest \
   --chunks data/demo/chunks.tsv \
   --pairs  data/demo/train_pairs.tsv \
