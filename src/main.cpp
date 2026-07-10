@@ -4,6 +4,7 @@
 #include "nanorag/contrastive.hpp"
 #include "nanorag/embedder.hpp"
 #include "nanorag/eval.hpp"
+#include "nanorag/generate_chat.hpp"
 #include "nanorag/grounding.hpp"
 #include "nanorag/hybrid.hpp"
 #include "nanorag/pipeline.hpp"
@@ -12,7 +13,10 @@
 #include "nanorag/word2vec.hpp"
 
 #include "nanollm/generate.hpp"
+#include "nanollm/meta.hpp"
 #include "nanollm/model.hpp"
+#include "nanollm/model_io.hpp"
+#include "nanollm/runtime.hpp"
 #include "nanollm/tokenizer.hpp"
 
 #include <algorithm>
@@ -40,6 +44,9 @@ void usage(const char* argv0) {
         << "         [--retrieve dense|sparse|hybrid]  (default hybrid)\n"
         << "         [--min-score F] [--mode extractive|generate]\n"
         << "         [--model <file.nanollm> --tokenizer <file.nllmtok>] [--max-tokens N]\n"
+        << "         generate chat: [--meta <model.meta.txt>] [--chat-family F]\n"
+        << "           [--system TEXT] [--use-model-system] [--allow-approx-chat]\n"
+        << "           [--no-bos|--bos] [--temperature F] [--prompt-file FILE]\n"
         << "  " << argv0 << " eval-paraphrase --index <dir> --pairs <eval.tsv> [--max-jaccard F]\n"
         << "         [--retrieve dense|sparse|hybrid]\n"
         << "  " << argv0 << " eval-grounding --index <dir> --pairs <eval.tsv>\n"
@@ -232,7 +239,8 @@ int cmd_ingest(const std::string& chunks_path, const std::string& out_dir, std::
 
 int cmd_ask(const std::string& index_dir, const std::string& query, std::size_t k, float min_score,
             const std::string& mode, const std::string& model_path, const std::string& tok_path,
-            int max_tokens, nanorag::RetrieveMode retrieve_mode) {
+            int max_tokens, nanorag::RetrieveMode retrieve_mode,
+            const nanorag::GenerateChatOptions& gen_opts) {
     nanorag::HybridConfig hcfg;
     hcfg.mode = retrieve_mode;
     auto retriever = nanorag::Retriever::open(index_dir, hcfg);
@@ -248,6 +256,9 @@ int cmd_ask(const std::string& index_dir, const std::string& query, std::size_t 
         ga = nanorag::answer_extractive_for_query(query, retrieved.chunks, retriever.embedder(),
                                                   gcfg);
     } else if (mode == "generate") {
+        if (tok_path.empty() && gen_opts.prompt_override.empty()) {
+            // tokenizer required unless only testing packaging (still need model+tok for generate)
+        }
         if (tok_path.empty()) {
             throw std::runtime_error("ask --mode generate requires --tokenizer");
         }
@@ -256,17 +267,52 @@ int cmd_ask(const std::string& index_dir, const std::string& query, std::size_t 
             ga = nanorag::answer_extractive_for_query(query, retrieved.chunks, retriever.embedder(),
                                                      gcfg);
         } else {
-            auto model = nanollm::LlamaModel::load(model_path);
+            auto file = nanollm::load_model(model_path);
+            const auto model_fmt = file.format_version;
+            nanollm::LlamaModel model = [&]() {
+                if (file.weight_format == nanollm::WeightFormat::Int8PerColumn) {
+                    return nanollm::LlamaModel(std::move(file.config), std::move(file.qweights));
+                }
+                if (file.weight_format == nanollm::WeightFormat::Int4Grouped) {
+                    return nanollm::LlamaModel(std::move(file.config), std::move(file.q4weights));
+                }
+                return nanollm::LlamaModel(std::move(file.config), std::move(file.weights));
+            }();
             auto tokenizer = nanollm::Tokenizer::load(tok_path);
-            auto prompt = nanorag::build_grounded_prompt(query, used);
-            nanollm::GenerateConfig cfg;
-            cfg.max_new_tokens = max_tokens;
-            cfg.sampler.temperature = 0.f;
+            if (tokenizer.vocab_size() != model.config().vocab_size) {
+                throw std::runtime_error("tokenizer vocab_size does not match model vocab_size");
+            }
+            auto meta = nanorag::load_meta_for_generate(model_path, gen_opts.meta_path);
+            // Fail-closed when a meta sidecar exists (same policy as nanollm CLI).
+            {
+                const auto meta_path = gen_opts.meta_path.empty()
+                                           ? nanollm::default_meta_txt_path(model_path)
+                                           : gen_opts.meta_path;
+                std::ifstream meta_in(meta_path);
+                if (meta_in) {
+                    nanollm::check_artifact_consistency(model.config(), model_fmt, tokenizer,
+                                                        tokenizer.format_version(), meta);
+                }
+            }
+
+            nanorag::GenerateChatOptions opts = gen_opts;
+            opts.max_new_tokens = max_tokens;
+            std::string family;
+            const std::string prompt =
+                nanorag::build_generate_prompt(query, used, opts, meta, &family);
+            auto runtime = nanorag::make_generate_runtime(meta, tokenizer, opts);
+            auto cfg = nanorag::make_generate_config(runtime, opts);
+
+            std::cout << "generate chat_family=" << family << " add_bos=" << (cfg.add_bos ? 1 : 0)
+                      << " stop_ids=" << cfg.stop_token_ids.size()
+                      << " temperature=" << cfg.sampler.temperature << "\n";
+
             auto result = nanollm::generate_text(model, tokenizer, prompt, cfg);
-            // Only newly sampled tokens (not prompt+gen decode).
             const std::string gen = nanollm::decode_generated_text(tokenizer, result);
             ga = nanorag::finalize_with_model_text(query, retrieved.chunks, gen,
                                                    &retriever.embedder(), gcfg);
+            // Keep chat-formatted prompt on the answer for debugging / eval.
+            ga.prompt = prompt;
         }
     } else {
         throw std::runtime_error("ask: unknown --mode (extractive|generate)");
@@ -478,6 +524,7 @@ int main(int argc, char** argv) {
             float min_score = nanorag::default_grounding_config().min_score;
             int max_tokens = 64;
             nanorag::RetrieveMode retrieve_mode = nanorag::RetrieveMode::Hybrid;
+            nanorag::GenerateChatOptions gen_opts;
             for (int i = 2; i < argc; ++i) {
                 const std::string a = argv[i];
                 if (a == "--index") {
@@ -501,6 +548,31 @@ int main(int argc, char** argv) {
                     tok = require_arg(i, argc, argv, "--tokenizer");
                 } else if (a == "--max-tokens") {
                     max_tokens = std::stoi(require_arg(i, argc, argv, "--max-tokens"));
+                } else if (a == "--meta") {
+                    gen_opts.meta_path = require_arg(i, argc, argv, "--meta");
+                } else if (a == "--chat-family") {
+                    gen_opts.chat_family = require_arg(i, argc, argv, "--chat-family");
+                } else if (a == "--system") {
+                    gen_opts.system_extra = require_arg(i, argc, argv, "--system");
+                } else if (a == "--use-model-system") {
+                    gen_opts.use_model_default_system = true;
+                } else if (a == "--allow-approx-chat") {
+                    gen_opts.allow_approx_chat = true;
+                } else if (a == "--no-bos") {
+                    gen_opts.force_no_bos = true;
+                } else if (a == "--bos") {
+                    gen_opts.force_bos = true;
+                } else if (a == "--temperature") {
+                    gen_opts.temperature = std::stof(require_arg(i, argc, argv, "--temperature"));
+                } else if (a == "--prompt-file") {
+                    const std::string pf = require_arg(i, argc, argv, "--prompt-file");
+                    std::ifstream in(pf);
+                    if (!in) {
+                        throw std::runtime_error("cannot open --prompt-file " + pf);
+                    }
+                    std::ostringstream ss;
+                    ss << in.rdbuf();
+                    gen_opts.prompt_override = ss.str();
                 } else {
                     throw std::runtime_error("unknown arg: " + a);
                 }
@@ -521,7 +593,8 @@ int main(int argc, char** argv) {
             if (!has_query) {
                 throw std::runtime_error("ask requires --query");
             }
-            return cmd_ask(index, query, k, min_score, mode, model, tok, max_tokens, retrieve_mode);
+            return cmd_ask(index, query, k, min_score, mode, model, tok, max_tokens, retrieve_mode,
+                           gen_opts);
         }
         if (cmd == "eval-paraphrase") {
             std::string index, pairs;

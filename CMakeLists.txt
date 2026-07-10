@@ -77,13 +77,17 @@ if(NANORAG_BUILD_TESTS)
   target_link_libraries(nanorag_grounding_tests PRIVATE nanorag)
   add_executable(nanorag_eval_harness tests/test_eval_harness.cpp)
   target_link_libraries(nanorag_eval_harness PRIVATE nanorag)
+  add_executable(nanorag_generate_chat_tests tests/test_generate_chat.cpp)
+  target_link_libraries(nanorag_generate_chat_tests PRIVATE nanorag)
   if(NOT MSVC)
     target_compile_options(nanorag_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(nanorag_grounding_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(nanorag_eval_harness PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(nanorag_generate_chat_tests PRIVATE -Wall -Wextra -Wpedantic)
   endif()
   add_test(NAME nanorag_tests COMMAND nanorag_tests)
   add_test(NAME nanorag_grounding_tests COMMAND nanorag_grounding_tests)
+  add_test(NAME nanorag_generate_chat_tests COMMAND nanorag_generate_chat_tests)
   # Eval harness needs data/demo; run from source root
   add_test(
     NAME nanorag_eval_harness

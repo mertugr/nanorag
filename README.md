@@ -111,9 +111,12 @@ See [COMPATIBILITY.md](COMPATIBILITY.md) for version matrix and format versions.
   --embedder contrastive --dim 64 --epochs 200
 
 ./build/nanorag ask --index index/demo -q "…" [--min-score 0.25] [--retrieve hybrid]
+# Generate mode is chat-aware (meta chat_family, stops, add_bos):
 ./build/nanorag ask --index index/demo -q "…" --mode generate \
-  --model m.nanollm --tokenizer t.nllmtok
-
+  --model m.nanollm --tokenizer t.nllmtok --meta m.meta.txt \
+  [--chat-family chatml|llama3|tinyllama|raw] [--allow-approx-chat] \
+  [--system "…"] [--use-model-system] [--no-bos] [--temperature 0]
+# Exact HF jinja: render with nanollm tools/hf_render_chat.py then --prompt-file
 ./build/nanorag eval-suite --data data/demo [--retrieve hybrid]
 # Phase 2: R@k/MRR (dense/sparse/hybrid A/B) + refuse + grounding + ablations
 
