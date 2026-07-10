@@ -114,11 +114,22 @@ inline std::shared_ptr<Embedder> load_embedder_for_index(const std::string& dir,
         }
         return emb;
     }
-    if (meta.embedder_id == kContrastiveEmbedderId) {
+    if (meta.embedder_id == kContrastiveEmbedderId ||
+        meta.embedder_id == kContrastiveEmbedderIdV1) {
         auto emb =
             std::make_shared<ContrastiveEmbedder>(ContrastiveEmbedder::load(dir + "/embeddings.nctr"));
         if (emb->dim() != meta.dim) {
             throw std::runtime_error("load_embedder_for_index: contrastive dim mismatch");
+        }
+        // Loaded object reports its format id; meta must match.
+        if (emb->id() != meta.embedder_id) {
+            // Allow v1 file under either label if dimensions match.
+            if (!(meta.embedder_id == kContrastiveEmbedderIdV1 &&
+                  emb->id() == kContrastiveEmbedderIdV1) &&
+                !(meta.embedder_id == kContrastiveEmbedderId && emb->id() == kContrastiveEmbedderId)) {
+                throw std::runtime_error("load_embedder_for_index: contrastive id mismatch meta=" +
+                                         meta.embedder_id + " file=" + emb->id());
+            }
         }
         return emb;
     }
@@ -178,6 +189,7 @@ public:
             const char* oods[] = {
                 "What is the boiling point of alcohol?",
                 "What is the boiling point of ethanol?",
+                "What is the boiling point of ethanol under one atmosphere?",
                 "What is the melting point of iron?",
                 "What is the freezing point of mercury?",
                 "How many legs does a spider have?",
@@ -191,6 +203,9 @@ public:
                 "Who invented the chocolate pizza telescope in medieval France?",
                 "What is the stock price of completely fictional company Zyblerqux?",
                 "How many purple dragons live in my kitchen toaster?",
+                "Which dog breed is best at herding sheep?",
+                "What dog breed herds livestock best?",
+                "Which canine variety is famous for sheep herding trials?",
             };
             for (const char* q : oods) {
                 train_pairs.push_back({q, kNoEvidenceId});

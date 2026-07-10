@@ -39,7 +39,7 @@ struct GroundingConfig {
     /// Minimum retrieval score (cosine-like) for a hit to be considered.
     float min_score = 0.25f;
     /// Without query↔passage lexical support, require this higher score (paraphrase path).
-    float min_score_without_query_support = 0.55f;
+    float min_score_without_query_support = 0.60f;
     /// Min fraction of query content tokens found in the passage for lexical path.
     float min_query_support = 0.20f;
     /// Min absolute query-content hits for the lexical path.
@@ -54,7 +54,7 @@ struct GroundingConfig {
 inline GroundingConfig default_grounding_config() {
     GroundingConfig c;
     c.min_score = 0.25f;
-    c.min_score_without_query_support = 0.55f;
+    c.min_score_without_query_support = 0.60f;
     c.min_query_support = 0.20f;
     c.min_query_support_hits = 1;
     c.max_context_chunks = 3;
@@ -178,7 +178,7 @@ inline double query_support_in_passage(const std::string& query, const std::stri
     return static_cast<double>(hits) / static_cast<double>(q.size());
 }
 
-/// Per-passage answerability (blocks near-misses like alcohol→water/cats).
+/// Per-passage answerability (blocks near-misses like alcohol/ethanol→water).
 inline bool passage_is_answerable(const std::string& query, const RetrievedChunk& h,
                                   const GroundingConfig& cfg) {
     if (is_no_evidence_chunk(h)) {
@@ -187,8 +187,27 @@ inline bool passage_is_answerable(const std::string& query, const RetrievedChunk
     if (h.score < cfg.min_score) {
         return false;
     }
+    const auto qtoks = content_tokens(query);
+    const auto ptoks = content_tokens(h.text);
+    std::unordered_set<std::string> pset(ptoks.begin(), ptoks.end());
     int hits = 0;
-    const double qsup = query_support_in_passage(query, h.text, &hits);
+    bool missing_distinctive = false;
+    for (const auto& tok : qtoks) {
+        if (pset.count(tok)) {
+            ++hits;
+        } else if (tok.size() >= 5) {
+            // Distinctive query term absent from passage (e.g. ethanol, alcohol, iron).
+            missing_distinctive = true;
+        }
+    }
+    const double qsup =
+        qtoks.empty() ? 0.0 : static_cast<double>(hits) / static_cast<double>(qtoks.size());
+
+    // If a long content token is missing, shared generics like "atmosphere" must not
+    // unlock the lexical path — only a strong embedding score may pass (paraphrase).
+    if (missing_distinctive) {
+        return h.score >= cfg.min_score_without_query_support;
+    }
     if (hits >= cfg.min_query_support_hits && qsup + 1e-12 >= cfg.min_query_support) {
         return true;
     }

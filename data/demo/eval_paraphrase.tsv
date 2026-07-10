@@ -1,10 +1,2 @@
-# Held-out paraphrase eval: query <TAB> gold_id
-What feline housemate purrs when comfortable?	0
-Which barking companion enjoys retrieving thrown objects?	1
-Name the feathered flyers that construct nests aloft	2
-Where would you look for a C++ ANN library with hierarchical navigable small world graphs?	3
-What dependency-free runtime runs decoder-only language models with quantized matmuls?	4
-Which layer retrieves passages then conditions a local generator for grounded answers?	5
-At one atm, pure water freezes at how many kelvin?	6
-What is the orbital period of Earth about the Sun?	7
-What algorithm family gives sublinear k-NN over dense embeddings via multilayer graphs?	8
+# DEPRECATED: use data/demo/eval/retrieval.tsv
+# Kept as a thin redirect note for humans; harness loads eval/retrieval.tsv.

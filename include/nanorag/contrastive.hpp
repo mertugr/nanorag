@@ -1,15 +1,13 @@
 #pragma once
 
-// Supervised contrastive sentence embedder (pure C++17).
+// Supervised contrastive dual encoder (pure C++17).
 //
-// Why not Word2Vec alone?
-//   Skip-gram word averages only capture co-occurrence. They fail when a query
-//   paraphrases a document with little lexical overlap. This model trains
-//   token embeddings so that embed(query) ≈ embed(positive_doc) under InfoNCE,
-//   using explicit (query, doc) pairs — the honest way to get paraphrase
-//   retrieval without external embedding APIs.
+// contrastive-v2: same stable mean-pool InfoNCE as v1, plus:
+//   - default dim 128, momentum SGD, cosine LR schedule
+//   - hashed char n-grams (3/4) + token bigrams in the mean pool
+//   - expanded synonymy training pairs (data/)
 //
-// Format: .nctr (magic NCTR)
+// Format: .nctr magic NCTR; version 2 (v1 still loadable as identity-feature model).
 
 #include "nanorag/chunk_store.hpp"
 #include "nanorag/embedder.hpp"
@@ -28,9 +26,11 @@
 
 namespace nanorag {
 
-inline constexpr const char* kContrastiveEmbedderId = "contrastive-v1";
+inline constexpr const char* kContrastiveEmbedderId = "contrastive-v2";
+inline constexpr const char* kContrastiveEmbedderIdV1 = "contrastive-v1";
 inline constexpr char kContrastiveMagic[4] = {'N', 'C', 'T', 'R'};
-inline constexpr std::uint32_t kContrastiveFormatVersion = 1;
+inline constexpr std::uint32_t kContrastiveFormatVersionV1 = 1;
+inline constexpr std::uint32_t kContrastiveFormatVersion = 2;
 
 struct TrainPair {
     std::string query;
@@ -38,15 +38,21 @@ struct TrainPair {
 };
 
 struct ContrastiveTrainConfig {
-    std::size_t dim = 64;
-    int epochs = 120;
+    std::size_t dim = 128;
+    int epochs = 420;
     float lr = 0.08f;
-    float temperature = 0.07f;
+    float momentum = 0.9f;
+    float temperature = 0.05f;
     std::uint32_t seed = 0xA11CEu;
     int min_count = 1;
-    /// In-batch negatives: use all other docs in the store (full softmax over docs).
     bool full_doc_softmax = true;
-    int max_negatives = 32;  // used when full_doc_softmax is false
+    int max_negatives = 32;
+    std::size_t ngram_buckets = 4096;
+    std::size_t bigram_buckets = 4096;
+    float ngram_weight = 0.35f;
+    float bigram_weight = 0.45f;
+    /// Accepted for API compat; tables use dim for both when emb_dim==0.
+    std::size_t emb_dim = 0;
 };
 
 inline std::vector<TrainPair> load_train_pairs(const std::string& path) {
@@ -78,50 +84,57 @@ inline std::vector<TrainPair> load_train_pairs(const std::string& path) {
     return pairs;
 }
 
+namespace ctr_detail {
+inline std::uint64_t mix64(std::uint64_t x) {
+    x += 0x9e3779b97f4a7c15ull;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+    return x ^ (x >> 31);
+}
+inline std::uint64_t hash_str(const std::string& s, std::uint64_t salt) {
+    return mix64(detail::fnv1a64(s) ^ salt);
+}
+inline void char_ngrams(const std::string& tok, std::size_t buckets, std::vector<std::size_t>& out) {
+    if (buckets == 0 || tok.empty()) {
+        return;
+    }
+    const std::string s = std::string("^") + tok + "$";
+    for (int n : {3, 4}) {
+        if (static_cast<int>(s.size()) < n) {
+            continue;
+        }
+        for (std::size_t i = 0; i + static_cast<std::size_t>(n) <= s.size(); ++i) {
+            out.push_back(static_cast<std::size_t>(
+                hash_str(s.substr(i, static_cast<std::size_t>(n)), 0xC4A7ull) % buckets));
+        }
+    }
+}
+}  // namespace ctr_detail
+
 class ContrastiveModel {
 public:
     std::size_t dim() const { return dim_; }
     std::size_t vocab_size() const { return vocab_.size(); }
+    std::uint32_t format_version() const { return format_version_; }
 
     std::vector<float> embed_text(const std::string& text) const {
         return embed_tokens(detail::simple_tokenize(text));
     }
 
     std::vector<float> embed_tokens(const std::vector<std::string>& tokens) const {
-        std::vector<float> v(dim_, 0.f);
-        int n = 0;
-        for (const auto& t : tokens) {
-            auto it = token_to_id_.find(t);
-            if (it == token_to_id_.end()) {
-                continue;
-            }
-            const float* row = emb_.data() + static_cast<std::size_t>(it->second) * dim_;
-            for (std::size_t d = 0; d < dim_; ++d) {
-                v[d] += row[d];
-            }
-            ++n;
-        }
-        if (n > 0) {
-            const float inv = 1.f / static_cast<float>(n);
-            for (float& x : v) {
-                x *= inv;
-            }
-            detail::l2_normalize(v);
-        }
-        return v;
+        return pool_tokens(tokens);
     }
 
-    /// Train token embeddings so paraphrastic queries rank their positive docs.
     static ContrastiveModel train(const ChunkStore& store, const std::vector<TrainPair>& pairs,
                                   ContrastiveTrainConfig cfg = {}) {
         if (cfg.dim == 0) {
             throw std::invalid_argument("ContrastiveModel: dim must be > 0");
         }
-        if (store.size() == 0) {
-            throw std::invalid_argument("ContrastiveModel: empty store");
+        if (cfg.emb_dim != 0) {
+            cfg.dim = cfg.emb_dim;  // single width tables
         }
-        if (pairs.empty()) {
-            throw std::invalid_argument("ContrastiveModel: empty train pairs");
+        if (store.size() == 0 || pairs.empty()) {
+            throw std::invalid_argument("ContrastiveModel: empty store or pairs");
         }
 
         std::unordered_map<std::string, int> counts;
@@ -136,13 +149,19 @@ public:
         for (const auto& p : pairs) {
             add_text(p.query);
             if (!store.contains(p.pos_id)) {
-                throw std::invalid_argument("ContrastiveModel: pair pos_id missing from store: " +
+                throw std::invalid_argument("ContrastiveModel: pair pos_id missing: " +
                                             std::to_string(p.pos_id));
             }
         }
 
         ContrastiveModel m;
+        m.format_version_ = kContrastiveFormatVersion;
         m.dim_ = cfg.dim;
+        m.ngram_buckets_ = cfg.ngram_buckets;
+        m.bigram_buckets_ = cfg.bigram_buckets;
+        m.ngram_weight_ = cfg.ngram_weight;
+        m.bigram_weight_ = cfg.bigram_weight;
+
         for (const auto& kv : counts) {
             if (kv.second >= cfg.min_count) {
                 m.token_to_id_[kv.first] = static_cast<int>(m.vocab_.size());
@@ -155,91 +174,74 @@ public:
 
         const int V = static_cast<int>(m.vocab_.size());
         m.emb_.assign(static_cast<std::size_t>(V) * m.dim_, 0.f);
+        m.ngram_emb_.assign(m.ngram_buckets_ * m.dim_, 0.f);
+        m.bigram_emb_.assign(m.bigram_buckets_ * m.dim_, 0.f);
+
         std::mt19937 rng(cfg.seed);
         std::uniform_real_distribution<float> ur(-0.5f, 0.5f);
         const float scale = 1.f / static_cast<float>(m.dim_);
         for (float& x : m.emb_) {
             x = ur(rng) * scale;
         }
-
-        // Cache doc embeddings recomputed each epoch (small corpora).
-        const auto chunks = store.all();
-        std::unordered_map<std::int64_t, std::size_t> id_to_row;
-        std::vector<std::int64_t> doc_ids;
-        doc_ids.reserve(chunks.size());
-        for (std::size_t i = 0; i < chunks.size(); ++i) {
-            id_to_row[chunks[i].id] = i;
-            doc_ids.push_back(chunks[i].id);
+        for (float& x : m.ngram_emb_) {
+            x = ur(rng) * scale * 0.5f;
+        }
+        for (float& x : m.bigram_emb_) {
+            x = ur(rng) * scale * 0.5f;
         }
 
-        auto embed_ids = [&](const std::vector<int>& ids) {
-            std::vector<float> v(m.dim_, 0.f);
-            if (ids.empty()) {
-                return v;
-            }
-            for (int id : ids) {
-                const float* row = m.emb_.data() + static_cast<std::size_t>(id) * m.dim_;
-                for (std::size_t d = 0; d < m.dim_; ++d) {
-                    v[d] += row[d];
-                }
-            }
-            const float inv = 1.f / static_cast<float>(ids.size());
-            for (float& x : v) {
-                x *= inv;
-            }
-            detail::l2_normalize(v);
-            return v;
-        };
+        std::vector<float> vel_emb(m.emb_.size(), 0.f);
+        std::vector<float> vel_ng(m.ngram_emb_.size(), 0.f);
+        std::vector<float> vel_bi(m.bigram_emb_.size(), 0.f);
 
-        auto tokenize_ids = [&](const std::string& text) {
-            std::vector<int> ids;
-            for (const auto& t : detail::simple_tokenize(text)) {
-                auto it = m.token_to_id_.find(t);
-                if (it != m.token_to_id_.end()) {
-                    ids.push_back(it->second);
-                }
-            }
-            return ids;
-        };
+        const auto chunks = store.all();
+        std::unordered_map<std::int64_t, std::size_t> id_to_row;
+        for (std::size_t i = 0; i < chunks.size(); ++i) {
+            id_to_row[chunks[i].id] = i;
+        }
 
-        // Pre-tokenize pairs and docs
         struct PairTok {
-            std::vector<int> q;
-            std::vector<int> pos;
-            std::int64_t pos_id;
+            std::vector<std::string> q;
+            std::vector<std::string> pos;
+            std::int64_t pos_id = 0;
         };
         std::vector<PairTok> pt;
         pt.reserve(pairs.size());
         for (const auto& p : pairs) {
             PairTok x;
-            x.q = tokenize_ids(p.query);
-            x.pos = tokenize_ids(store.get(p.pos_id).text);
+            x.q = detail::simple_tokenize(p.query);
+            x.pos = detail::simple_tokenize(store.get(p.pos_id).text);
             x.pos_id = p.pos_id;
             if (x.q.empty() || x.pos.empty()) {
-                throw std::invalid_argument(
-                    "ContrastiveModel: pair has empty tokens after vocab filter");
+                throw std::invalid_argument("ContrastiveModel: empty tokens after tokenize");
             }
             pt.push_back(std::move(x));
         }
-
-        std::vector<std::vector<int>> doc_tok(chunks.size());
+        std::vector<std::vector<std::string>> doc_tok(chunks.size());
         for (std::size_t i = 0; i < chunks.size(); ++i) {
-            doc_tok[i] = tokenize_ids(chunks[i].text);
+            doc_tok[i] = detail::simple_tokenize(chunks[i].text);
         }
 
-        // InfoNCE: for each query, scores against all docs (or sampled negs + pos).
+        auto apply = [&](std::vector<float>& param, std::vector<float>& vel,
+                         const std::vector<float>& grad, float lr) {
+            for (std::size_t i = 0; i < param.size(); ++i) {
+                vel[i] = cfg.momentum * vel[i] + grad[i];
+                param[i] -= lr * vel[i];
+            }
+        };
+
         for (int epoch = 0; epoch < cfg.epochs; ++epoch) {
-            const float lr =
-                cfg.lr * (1.f - 0.9f * static_cast<float>(epoch) / static_cast<float>(cfg.epochs));
+            const float t =
+                static_cast<float>(epoch) / static_cast<float>(std::max(1, cfg.epochs - 1));
+            const float lr = cfg.lr * (0.15f + 0.85f * 0.5f * (1.f + std::cos(3.14159265f * t)));
             std::shuffle(pt.begin(), pt.end(), rng);
 
             for (const auto& pair : pt) {
-                auto qv = embed_ids(pair.q);
-                // Collect candidate docs: all docs or pos + random negs
                 std::vector<std::size_t> cand_rows;
                 if (cfg.full_doc_softmax) {
+                    cand_rows.resize(chunks.size());
                     for (std::size_t i = 0; i < chunks.size(); ++i) {
-                        cand_rows.push_back(i);
+                        cand_rows[i] = i;
                     }
                 } else {
                     cand_rows.push_back(id_to_row.at(pair.pos_id));
@@ -256,6 +258,7 @@ public:
                     }
                 }
 
+                auto qv = m.pool_tokens(pair.q);
                 std::vector<std::vector<float>> dvs;
                 dvs.reserve(cand_rows.size());
                 std::vector<float> logits;
@@ -266,7 +269,7 @@ public:
                     if (chunks[row].id == pair.pos_id) {
                         pos_index = static_cast<int>(ci);
                     }
-                    auto dv = embed_ids(doc_tok[row]);
+                    auto dv = m.pool_tokens(doc_tok[row]);
                     float dot = 0.f;
                     for (std::size_t d = 0; d < m.dim_; ++d) {
                         dot += qv[d] * dv[d];
@@ -278,7 +281,6 @@ public:
                     throw std::logic_error("ContrastiveModel: positive missing from candidates");
                 }
 
-                // softmax
                 float mx = *std::max_element(logits.begin(), logits.end());
                 std::vector<float> prob(logits.size());
                 float sum = 0.f;
@@ -290,10 +292,6 @@ public:
                     p /= sum;
                 }
 
-                // dL/d(logit_i) = prob_i - 1_{i=pos}
-                // logit = cos/T ≈ dot/T since L2-normalized
-                // We backprop through mean-pool embeddings (approx: ignore L2 norm Jacobian
-                // for stability on small models — common practical simplification).
                 std::vector<float> gq(m.dim_, 0.f);
                 std::vector<std::vector<float>> gd(dvs.size(), std::vector<float>(m.dim_, 0.f));
                 for (std::size_t i = 0; i < logits.size(); ++i) {
@@ -308,28 +306,23 @@ public:
                     }
                 }
 
-                auto apply_token_grads = [&](const std::vector<int>& toks,
-                                             const std::vector<float>& g_out) {
-                    if (toks.empty()) {
-                        return;
-                    }
-                    const float inv = 1.f / static_cast<float>(toks.size());
-                    for (int tid : toks) {
-                        float* row = m.emb_.data() + static_cast<std::size_t>(tid) * m.dim_;
-                        for (std::size_t d = 0; d < m.dim_; ++d) {
-                            row[d] -= lr * g_out[d] * inv;
-                        }
-                    }
-                };
-
-                apply_token_grads(pair.q, gq);
+                std::vector<float> g_emb(m.emb_.size(), 0.f);
+                std::vector<float> g_ng(m.ngram_emb_.size(), 0.f);
+                std::vector<float> g_bi(m.bigram_emb_.size(), 0.f);
+                m.accum_grad(pair.q, gq, g_emb, g_ng, g_bi);
                 for (std::size_t i = 0; i < cand_rows.size(); ++i) {
-                    apply_token_grads(doc_tok[cand_rows[i]], gd[i]);
+                    m.accum_grad(doc_tok[cand_rows[i]], gd[i], g_emb, g_ng, g_bi);
+                }
+                apply(m.emb_, vel_emb, g_emb, lr);
+                if (!m.ngram_emb_.empty()) {
+                    apply(m.ngram_emb_, vel_ng, g_ng, lr);
+                }
+                if (!m.bigram_emb_.empty()) {
+                    apply(m.bigram_emb_, vel_bi, g_bi, lr);
                 }
             }
         }
 
-        // L2-normalize rows for stable mean pooling at inference.
         for (int i = 0; i < V; ++i) {
             float* row = m.emb_.data() + static_cast<std::size_t>(i) * m.dim_;
             double ss = 0;
@@ -354,17 +347,20 @@ public:
         out.write(kContrastiveMagic, 4);
         write_u32(out, kContrastiveFormatVersion);
         write_u32(out, static_cast<std::uint32_t>(dim_));
+        write_u32(out, static_cast<std::uint32_t>(ngram_buckets_));
+        write_u32(out, static_cast<std::uint32_t>(bigram_buckets_));
+        write_f32(out, ngram_weight_);
+        write_f32(out, bigram_weight_);
         write_u32(out, static_cast<std::uint32_t>(vocab_.size()));
         for (const auto& w : vocab_) {
-            if (w.size() > 65535) {
-                throw std::runtime_error("ContrastiveModel::save: token too long");
-            }
             write_u16(out, static_cast<std::uint16_t>(w.size()));
             out.write(w.data(), static_cast<std::streamsize>(w.size()));
             const float* row = emb_.data() + static_cast<std::size_t>(token_to_id_.at(w)) * dim_;
             out.write(reinterpret_cast<const char*>(row),
                       static_cast<std::streamsize>(dim_ * sizeof(float)));
         }
+        write_buf(out, ngram_emb_);
+        write_buf(out, bigram_emb_);
     }
 
     static ContrastiveModel load(const std::string& path) {
@@ -378,40 +374,187 @@ public:
             magic[3] != 'R') {
             throw std::runtime_error("ContrastiveModel::load: bad magic");
         }
-        if (read_u32(in) != kContrastiveFormatVersion) {
+        const auto ver = read_u32(in);
+        if (ver == kContrastiveFormatVersionV1) {
+            ContrastiveModel m;
+            m.format_version_ = ver;
+            m.dim_ = read_u32(in);
+            m.ngram_buckets_ = 0;
+            m.bigram_buckets_ = 0;
+            const auto V = read_u32(in);
+            m.emb_.assign(static_cast<std::size_t>(V) * m.dim_, 0.f);
+            for (std::uint32_t i = 0; i < V; ++i) {
+                const auto len = read_u16(in);
+                std::string w(len, '\0');
+                in.read(w.data(), static_cast<std::streamsize>(len));
+                m.token_to_id_[w] = static_cast<int>(i);
+                m.vocab_.push_back(std::move(w));
+                in.read(reinterpret_cast<char*>(m.emb_.data() + static_cast<std::size_t>(i) * m.dim_),
+                        static_cast<std::streamsize>(m.dim_ * sizeof(float)));
+                if (!in) {
+                    throw std::runtime_error("ContrastiveModel::load v1 truncated");
+                }
+            }
+            return m;
+        }
+        if (ver != kContrastiveFormatVersion) {
             throw std::runtime_error("ContrastiveModel::load: bad version");
         }
         ContrastiveModel m;
+        m.format_version_ = ver;
         m.dim_ = read_u32(in);
+        m.ngram_buckets_ = read_u32(in);
+        m.bigram_buckets_ = read_u32(in);
+        m.ngram_weight_ = read_f32(in);
+        m.bigram_weight_ = read_f32(in);
         const auto V = read_u32(in);
         m.emb_.assign(static_cast<std::size_t>(V) * m.dim_, 0.f);
-        m.vocab_.reserve(V);
         for (std::uint32_t i = 0; i < V; ++i) {
             const auto len = read_u16(in);
             std::string w(len, '\0');
-            in.read(w.data(), len);
+            in.read(w.data(), static_cast<std::streamsize>(len));
             m.token_to_id_[w] = static_cast<int>(i);
             m.vocab_.push_back(std::move(w));
             in.read(reinterpret_cast<char*>(m.emb_.data() + static_cast<std::size_t>(i) * m.dim_),
                     static_cast<std::streamsize>(m.dim_ * sizeof(float)));
             if (!in) {
-                throw std::runtime_error("ContrastiveModel::load: truncated");
+                throw std::runtime_error("ContrastiveModel::load truncated");
             }
         }
+        m.ngram_emb_.assign(m.ngram_buckets_ * m.dim_, 0.f);
+        m.bigram_emb_.assign(m.bigram_buckets_ * m.dim_, 0.f);
+        read_buf(in, m.ngram_emb_);
+        read_buf(in, m.bigram_emb_);
         return m;
     }
 
 private:
+    std::uint32_t format_version_ = kContrastiveFormatVersion;
     std::size_t dim_ = 0;
+    std::size_t ngram_buckets_ = 0;
+    std::size_t bigram_buckets_ = 0;
+    float ngram_weight_ = 0.35f;
+    float bigram_weight_ = 0.45f;
     std::vector<std::string> vocab_;
     std::unordered_map<std::string, int> token_to_id_;
     std::vector<float> emb_;
+    std::vector<float> ngram_emb_;
+    std::vector<float> bigram_emb_;
 
-    static void write_u32(std::ostream& out, std::uint32_t v) {
-        out.write(reinterpret_cast<const char*>(&v), 4);
+    std::vector<float> pool_tokens(const std::vector<std::string>& tokens) const {
+        std::vector<float> v(dim_, 0.f);
+        float wsum = 0.f;
+        for (const auto& t : tokens) {
+            auto it = token_to_id_.find(t);
+            if (it != token_to_id_.end()) {
+                const float* row = emb_.data() + static_cast<std::size_t>(it->second) * dim_;
+                for (std::size_t d = 0; d < dim_; ++d) {
+                    v[d] += row[d];
+                }
+                wsum += 1.f;
+            }
+            if (ngram_buckets_ > 0 && !ngram_emb_.empty()) {
+                std::vector<std::size_t> ngs;
+                ctr_detail::char_ngrams(t, ngram_buckets_, ngs);
+                for (std::size_t b : ngs) {
+                    const float* row = ngram_emb_.data() + b * dim_;
+                    for (std::size_t d = 0; d < dim_; ++d) {
+                        v[d] += ngram_weight_ * row[d];
+                    }
+                    wsum += ngram_weight_;
+                }
+            }
+        }
+        if (bigram_buckets_ > 0 && !bigram_emb_.empty()) {
+            for (std::size_t i = 0; i + 1 < tokens.size(); ++i) {
+                const std::string bg = tokens[i] + "_" + tokens[i + 1];
+                const std::size_t b =
+                    static_cast<std::size_t>(ctr_detail::hash_str(bg, 0xB16Aull) % bigram_buckets_);
+                const float* row = bigram_emb_.data() + b * dim_;
+                for (std::size_t d = 0; d < dim_; ++d) {
+                    v[d] += bigram_weight_ * row[d];
+                }
+                wsum += bigram_weight_;
+            }
+        }
+        if (wsum > 0.f) {
+            const float inv = 1.f / wsum;
+            for (float& x : v) {
+                x *= inv;
+            }
+            detail::l2_normalize(v);
+        }
+        return v;
     }
-    static void write_u16(std::ostream& out, std::uint16_t v) {
-        out.write(reinterpret_cast<const char*>(&v), 2);
+
+    void accum_grad(const std::vector<std::string>& tokens, const std::vector<float>& g_out,
+                    std::vector<float>& g_emb, std::vector<float>& g_ng,
+                    std::vector<float>& g_bi) const {
+        // Approximate: ignore L2 jacobian; distribute mean-pool grads.
+        float wsum = 0.f;
+        for (const auto& t : tokens) {
+            if (token_to_id_.count(t)) {
+                wsum += 1.f;
+            }
+            if (ngram_buckets_ > 0) {
+                std::vector<std::size_t> ngs;
+                ctr_detail::char_ngrams(t, ngram_buckets_, ngs);
+                wsum += ngram_weight_ * static_cast<float>(ngs.size());
+            }
+        }
+        if (bigram_buckets_ > 0 && tokens.size() > 1) {
+            wsum += bigram_weight_ * static_cast<float>(tokens.size() - 1);
+        }
+        if (!(wsum > 0.f)) {
+            return;
+        }
+        const float inv = 1.f / wsum;
+        for (const auto& t : tokens) {
+            auto it = token_to_id_.find(t);
+            if (it != token_to_id_.end()) {
+                float* grow = g_emb.data() + static_cast<std::size_t>(it->second) * dim_;
+                for (std::size_t d = 0; d < dim_; ++d) {
+                    grow[d] += g_out[d] * inv;
+                }
+            }
+            if (ngram_buckets_ > 0 && !g_ng.empty()) {
+                std::vector<std::size_t> ngs;
+                ctr_detail::char_ngrams(t, ngram_buckets_, ngs);
+                for (std::size_t b : ngs) {
+                    float* grow = g_ng.data() + b * dim_;
+                    for (std::size_t d = 0; d < dim_; ++d) {
+                        grow[d] += ngram_weight_ * g_out[d] * inv;
+                    }
+                }
+            }
+        }
+        if (bigram_buckets_ > 0 && !g_bi.empty()) {
+            for (std::size_t i = 0; i + 1 < tokens.size(); ++i) {
+                const std::string bg = tokens[i] + "_" + tokens[i + 1];
+                const std::size_t b =
+                    static_cast<std::size_t>(ctr_detail::hash_str(bg, 0xB16Aull) % bigram_buckets_);
+                float* grow = g_bi.data() + b * dim_;
+                for (std::size_t d = 0; d < dim_; ++d) {
+                    grow[d] += bigram_weight_ * g_out[d] * inv;
+                }
+            }
+        }
+    }
+
+    static void write_u32(std::ostream& o, std::uint32_t v) {
+        o.write(reinterpret_cast<const char*>(&v), 4);
+    }
+    static void write_u16(std::ostream& o, std::uint16_t v) {
+        o.write(reinterpret_cast<const char*>(&v), 2);
+    }
+    static void write_f32(std::ostream& o, float v) {
+        o.write(reinterpret_cast<const char*>(&v), 4);
+    }
+    static void write_buf(std::ostream& o, const std::vector<float>& v) {
+        if (!v.empty()) {
+            o.write(reinterpret_cast<const char*>(v.data()),
+                    static_cast<std::streamsize>(v.size() * sizeof(float)));
+        }
     }
     static std::uint32_t read_u32(std::istream& in) {
         std::uint32_t v = 0;
@@ -429,6 +572,24 @@ private:
         }
         return v;
     }
+    static float read_f32(std::istream& in) {
+        float v = 0;
+        in.read(reinterpret_cast<char*>(&v), 4);
+        if (!in) {
+            throw std::runtime_error("ContrastiveModel: short f32");
+        }
+        return v;
+    }
+    static void read_buf(std::istream& in, std::vector<float>& v) {
+        if (v.empty()) {
+            return;
+        }
+        in.read(reinterpret_cast<char*>(v.data()),
+                static_cast<std::streamsize>(v.size() * sizeof(float)));
+        if (!in) {
+            throw std::runtime_error("ContrastiveModel: short buf");
+        }
+    }
 };
 
 class ContrastiveEmbedder final : public Embedder {
@@ -436,7 +597,10 @@ public:
     explicit ContrastiveEmbedder(ContrastiveModel model) : model_(std::move(model)) {}
 
     std::size_t dim() const override { return model_.dim(); }
-    std::string id() const override { return kContrastiveEmbedderId; }
+    std::string id() const override {
+        return model_.format_version() == kContrastiveFormatVersionV1 ? kContrastiveEmbedderIdV1
+                                                                      : kContrastiveEmbedderId;
+    }
     std::vector<float> embed(const std::string& text) const override {
         return model_.embed_text(text);
     }

@@ -1,0 +1,25 @@
+# HARD retrieval: zero content-token overlap with gold.
+# Integrity (harness-enforced):
+#  - string disjoint from train + easy + refuse
+#  - max train seq similarity < 0.50
+#  - max train content Jaccard < 0.25
+#  - no same-id train distinctive token (len>=4)
+#  - char n-gram coverage vs gold <= 0.15
+What purring sofa buddy steals your chair every evening?	0
+Which whiskered roommate greets you for midnight snacks?	0
+What pack buddy rides shotgun on weekend errands?	1
+Which tail-wagger chases tennis balls across lawns?	1
+What treetop singers greet the morning fog?	2
+Which sky travelers cross continents each season?	2
+What in-house lookalike ranker skips disk-remote fanout entirely?	3
+Which Cplusplus lookalike ranker never phones a remote service?	3
+What laptop chat brain works with zero cloud APIs?	4
+What pocket-sized chat brain types answers from private weights?	4
+What silent desk helper ranks docs then stamps footnotes?	5
+Which offline-reply app attaches footnotes after ranking?	5
+When does outdoor kitchen broth turn crunchy in winter chill?	6
+When does porch-side soup go crunchy after a cold night?	6
+What gray boulder tags along with the world under our feet?	7
+Which lonely boulder trails the world that holds our cities?	7
+What topology finds lookalikes faster by holding extra nodes?	8
+Which layered mesh finds lookalikes using spare RAM chips?	8

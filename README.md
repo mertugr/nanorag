@@ -10,7 +10,7 @@ Local **C++17 RAG** orchestrator over owned libraries:
 
 No Hugging Face or third-party ML runtimes on the default path.
 
-**Status:** Phase 0 sealed. **Phase 1 packaging** — hybrid submodules (default) + install/export + CI. Not yet a production dual-encoder product.
+**Status:** Phase 0 sealed · Phase 1 packaging · Phase 2 eval foundation · contrastive-v2 dense encoder. Honest hard retrieval (no train synonym leak) is still weak — not production dual-encoder quality.
 
 ---
 
@@ -30,7 +30,8 @@ optional nanollm generate (validated; falls back if ungrounded)
 
 | ID | Learning | Use |
 |----|----------|-----|
-| `contrastive-v1` | Supervised InfoNCE on `(query → doc_id)` pairs | **Default** |
+| `contrastive-v2` | InfoNCE dual encoder: word+char-ngram+bigram pool → MLP → L2 | **Default** |
+| `contrastive-v1` | Legacy mean-pool BOW (load only) | Old indexes |
 | `word2vec-v1` | Skip-gram on chunk text | Ablation |
 | `hashing-v1` | Feature hashing | Ablation / tests |
 
@@ -110,6 +111,9 @@ See [COMPATIBILITY.md](COMPATIBILITY.md) for version matrix and format versions.
 ./build/nanorag ask --index index/demo -q "…" --mode generate \
   --model m.nanollm --tokenizer t.nllmtok
 
+./build/nanorag eval-suite --data data/demo
+# Phase 2: R@k/MRR + refuse IDK + grounding + ablations + quality gates
+
 ./build/nanorag eval-paraphrase --index index/demo \
   --pairs data/demo/eval_paraphrase.tsv
 # top hit among *real* docs only (skips NO_EVIDENCE)
@@ -127,7 +131,7 @@ See [COMPATIBILITY.md](COMPATIBILITY.md) for version matrix and format versions.
 index/demo/
   chunks.tsv              # id \t source \t text  (may include id=-1 NO_EVIDENCE)
   vectors.hnsw.tann       # tinyann HNSW
-  embeddings.nctr         # contrastive-v1 weights (or .nw2v for word2vec)
+  embeddings.nctr         # contrastive-v2 weights (or .nw2v for word2vec)
   meta.txt                # v2: embedder_id, dim, n_chunks, n_real_chunks, has_no_evidence
 ```
 
@@ -140,12 +144,42 @@ Query-time embedder **must** match `embedder_id` / `dim`.
 ```
 data/demo/
   chunks.tsv              # neutral passages (not query-shaped answers)
-  train_pairs.tsv         # paraphrase_query \t positive_id
-  eval_paraphrase.tsv     # held-out paraphrases
-  eval_hard_ood.tsv       # realistic near-miss / OOD questions
+  train_pairs.tsv         # TRAIN ONLY paraphrase_query \t positive_id
+  eval/
+    retrieval.tsv         # easy held-out (may share keywords) — smoke
+    retrieval_hard.tsv    # hard: zero content-token overlap with gold
+    refuse.tsv            # must answer exactly "I don't know"
+    README.md             # format + disjointness rule
+  eval_paraphrase.tsv     # deprecated thin pointer → eval/
+  eval_hard_ood.tsv       # deprecated thin pointer → eval/
 ```
 
 ---
+
+
+## Evaluation (Phase 2 foundation)
+
+Labeled sets live under `data/demo/eval/` and **must not overlap** train queries
+(`data/demo/train_pairs.tsv`). The harness enforces disjointness.
+
+| Metric | Set | Meaning |
+|--------|-----|---------|
+| R@k / MRR **easy** | `eval/retrieval.tsv` | May share gold keywords — **smoke only** |
+| R@k / MRR **hard** | `eval/retrieval_hard.tsv` | Zero gold keywords **and** no train synonym/near-dup leakage |
+| Refuse pass rate | `eval/refuse.tsv` | Exact `I don't know`, empty context |
+| Grounding full pass | easy retrieval labels | Answer + valid cites + gold cited |
+| Ablations | easy + hard | hashing / word2vec / contrastive |
+
+> Easy R@1≈1 is **not** dual-encoder quality. **Hard** forbids gold keyword overlap **and**
+> train near-dups / same-id synonym tokens / morph n-gram leakage — that is the honest score.
+
+```bash
+# Full suite (also runs via ctest: nanorag_eval_harness)
+./build/nanorag eval-suite --data data/demo
+ctest --test-dir build -R eval_harness --output-on-failure
+```
+
+See `data/demo/eval/README.md`.
 
 ## Tests
 
@@ -153,6 +187,7 @@ data/demo/
 |--------|----------|
 | `nanorag_tests` | Hashing, store, contrastive paraphrase recall, ablations |
 | `nanorag_grounding_tests` | Citations, alcohol near-miss refuse, blank query, OOD, validator |
+| `nanorag_eval_harness` | Disjoint train/eval, R@k/MRR, refuse, grounding, ablations, hard cases |
 
 ---
 
@@ -169,8 +204,9 @@ data/demo/
 ## Roadmap
 
 1. **Phase 0** — scaffold + contrastive + grounding (**sealed**)
-2. **Phase 1** — hybrid submodules + install/export, CI, VERSION, LICENSE (**this**)
-3. **Phase 2+** — stronger embedders, hybrid lexical+dense, production packaging
+2. **Phase 1** — hybrid submodules + install/export, CI, VERSION, LICENSE
+3. **Phase 2** — eval foundation (this PR): labeled sets, R@k/MRR, refuse, grounding, ablations
+4. **Phase 2+** — retrieval quality lift, stronger embedders, hybrid lexical+dense
 
 ## License
 

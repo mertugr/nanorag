@@ -1,35 +1,37 @@
-# Supervised contrastive pairs: paraphrase_query <TAB> positive_chunk_id
-# Queries intentionally avoid copying distinctive content words from the gold passage.
+# TRAIN ONLY — must not appear in data/demo/eval/*
+# format: query <TAB> positive_chunk_id
 Which small companion mammal makes a soft vibrating sound when relaxed?	0
 What domestic predator is associated with catching household vermin?	0
 Which pet species is a felid that shares living space with humans?	0
 What species produces a short high call when soliciting attention from people?	0
+Which feline pet shares dwellings and makes soft contented sounds?	0
 What animal is famous for short explosive vocal bursts and fetch games?	1
 Which companion canid joins people on outdoor walks?	1
 What social pet performs object retrieval play?	1
+What barking pet enjoys object retrieval and outdoor excursions?	1
+Which social canid produces explosive vocalizations?	1
 What class of winged creatures includes eagles and builds nests?	2
 Which flying vertebrates are covered in feathers?	2
 Name creatures with keratin wings capable of powered flight	2
+Name feathered animals that build nests and can fly?	2
 What pure C++ toolkit finds nearest vectors with graph-based approximate search?	3
 Which project provides hierarchical navigable small world style ANN in process memory?	3
 Where is brute-force exact scan implemented beside approximate graph indexes in C++?	3
+What C++ library implements hierarchical navigable small world indexes?	3
 What engine runs decoder-only transformers without external ML frameworks?	4
 Which runtime loads custom LLM checkpoints and streams generated tokens?	4
 What dependency-free stack executes Llama-like generation on commodity CPUs?	4
 Which project implements quantized matrix multiplies for local language models?	4
+What from-scratch C++ stack runs Llama-like models with quantized matmuls?	4
 What component stitches passage lookup to a local generator for grounded answers?	5
 Which application layer conditions generation on retrieved document passages?	5
 What glue turns a neighbor index plus local generator into a grounded QA loop?	5
 Which system embeds documents then retrieves them before calling a language model?	5
 At standard pressure, when does pure water become ice on the kelvin scale?	6
 What temperature marks the boiling transition of H2O at one atmosphere?	6
+At one atm when does pure H2O become solid on the kelvin scale?	6
 How long does our planet take to complete one path around its star?	7
 What body is the primary natural satellite of Terra?	7
+What body orbits Terra as its moon?	7
 What data structure enables sublinear neighbor queries in continuous embedding spaces?	8
 Which graph family is used for fast approximate search over high-dimensional vectors?	8
-How many days does Earth need to orbit the Sun once?	7
-What is the orbital period of Earth about the Sun roughly in days?	7
-Which natural satellite belongs to Earth?	7
-What body orbits Terra as its moon?	7
-What feline housemate purrs when comfortable?	0
-Which pet makes a soft vibrating sound of contentment?	0

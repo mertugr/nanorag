@@ -89,6 +89,8 @@ int main() {
         {"Which companion canid joins people on outdoor walks?", 1},
         {"What barking pet enjoys object retrieval and outdoor excursions?", 1},
         {"Which social canid produces explosive vocalizations?", 1},
+        {"What loyal companion wags and chases thrown toys outdoors?", 1},
+        {"Which pet enjoys fetch games and strolls with its owner?", 1},
         {"What class of winged creatures includes eagles?", 2},
         {"Which flying vertebrates are covered in feathers?", 2},
         {"Name feathered animals that build nests and can fly?", 2},
@@ -110,9 +112,10 @@ int main() {
     // --- Contrastive: paraphrase retrieval must work ---
     {
         nanorag::ContrastiveTrainConfig cfg;
-        cfg.dim = 64;
-        cfg.epochs = 350;
-        cfg.lr = 0.09f;
+        cfg.dim = 128;
+        cfg.epochs = 450;
+        cfg.lr = 0.08f;
+        cfg.momentum = 0.9f;
         cfg.temperature = 0.05f;
         cfg.seed = 99;
         // No NO_EVIDENCE injection: this suite measures paraphrase retrieval only.
