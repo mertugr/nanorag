@@ -143,6 +143,43 @@ int main() {
         CHECK(ga.check.ok);
     }
 
+    // --- issue #12: is_dont_know is exact match only (not prefix) ---
+    {
+        CHECK(nanorag::is_dont_know("I don't know"));
+        CHECK(nanorag::is_dont_know("  I do not know  "));
+        CHECK(nanorag::is_dont_know("i don't know"));
+        // Hallucinated prefix must NOT count as refuse (issue #12).
+        CHECK(!nanorag::is_dont_know("I don't know. Water boils at 100C [#999]"));
+        CHECK(!nanorag::is_dont_know("I do not know — the answer is cats [#10]"));
+        CHECK(!nanorag::is_dont_know("I don't know something"));
+
+        nanorag::GroundingConfig cfg = nanorag::default_grounding_config();
+        std::vector<nanorag::RetrievedChunk> used = {
+            {10, 0.9f, "a", "Felis catus is a small carnivorous mammal."}};
+        // Prefix + hallucinated claim + illegal cite must fail validation.
+        auto bad = nanorag::validate_grounding(
+            "I don't know. Water boils at 100C [#999]", used, cfg);
+        CHECK(!bad.ok);
+        CHECK(!bad.refused);
+
+        // finalize_with_model_text must not accept the hallucinated refuse as success.
+        std::vector<nanorag::RetrievedChunk> cand = used;
+        auto ga = nanorag::finalize_with_model_text(
+            "What is the boiling point of water?", cand,
+            "I don't know. Water boils at 100C [#999]", nullptr, cfg);
+        // Either forced exact refuse (empty used) or extractive fallback — never the
+        // hallucinated string as a grounded "success".
+        CHECK(ga.answer != std::string("I don't know. Water boils at 100C [#999]"));
+        if (ga.refused) {
+            CHECK(ga.answer == std::string(nanorag::kDontKnowAnswer));
+            CHECK(ga.check.ok);
+        } else {
+            CHECK(ga.check.ok);
+            CHECK(ga.mode == "extractive" || ga.mode == "extractive_fallback" ||
+                  ga.mode == "generated");
+        }
+    }
+
     // --- issue #15: BM25-scale scores must not unlock paraphrase path ---
     {
         nanorag::GroundingConfig cfg = nanorag::default_grounding_config();
