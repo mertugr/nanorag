@@ -113,15 +113,12 @@ inline std::string to_lower_copy(std::string s) {
     return s;
 }
 
+/// Exact refuse phrase only (after normalize + lower). Prefix match is intentionally
+/// rejected so generate-mode hallucinations like "I don't know. Water boils… [#9]"
+/// do not pass as a successful refusal (issue #12).
 inline bool is_dont_know(const std::string& answer) {
     auto t = to_lower_copy(normalize_ws(answer));
-    if (t == "i don't know" || t == "i do not know") {
-        return true;
-    }
-    if (t.rfind("i don't know", 0) == 0 || t.rfind("i do not know", 0) == 0) {
-        return true;
-    }
-    return false;
+    return t == "i don't know" || t == "i do not know";
 }
 
 inline bool is_blank_query(const std::string& query) {
