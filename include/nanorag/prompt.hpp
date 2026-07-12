@@ -15,6 +15,9 @@ struct RetrievedChunk {
     float score = 0.f;
     std::string source;
     std::string text;
+    /// True when `score` is dense cosine (or equivalent in [~-1,1]).
+    /// False for BM25 / fusion ranking scores that must not drive paraphrase gates.
+    bool score_is_cosine = true;
 };
 
 // Forward declaration — full grounded prompt lives in grounding.hpp to avoid cycles.

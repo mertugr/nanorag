@@ -351,6 +351,9 @@ inline std::vector<tinyann::SearchResult> dense_primary_fuse(
             continue;
         }
         // Inject sparse-only hits that dense missed but BM25 is confident about.
+        // Ranking-only synthetic score: pipeline::retrieve re-scores injects with
+        // embedder cosine before answerability (issues #11, #14). Do not treat this
+        // value as cosine in the gate.
         if (h.score >= cfg.strong_sparse_inject) {
             // Place just below a typical dense top hit so inject helps R@k without
             // overtaking a high dense cosine unless dense was weak.
