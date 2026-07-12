@@ -1,6 +1,7 @@
 // nanorag CLI — owned-stack RAG with grounded answers + citations.
 
 #include "nanorag/chunk_store.hpp"
+#include "nanorag/chunker.hpp"
 #include "nanorag/contrastive.hpp"
 #include "nanorag/embedder.hpp"
 #include "nanorag/eval.hpp"
@@ -37,6 +38,10 @@ void usage(const char* argv0) {
         << "nanorag — local grounded RAG (tinyann + nanollm + in-house embedders)\n\n"
         << "Usage:\n"
         << "  " << argv0 << " smoke\n"
+        << "  " << argv0 << " chunk --input <file|dir> --out <chunks.tsv>\n"
+        << "         [--strategy paragraph|sentence|window|markdown]\n"
+        << "         [--max-chars N] [--overlap N] [--min-chars N] [--start-id N]\n"
+        << "         [--source LABEL]\n"
         << "  " << argv0 << " ingest --chunks <tsv> --out <dir>\n"
         << "         [--embedder contrastive|word2vec|hashing]\n"
         << "         [--pairs <train_pairs.tsv>] [--dim N] [--epochs N]\n"
@@ -458,6 +463,37 @@ int cmd_eval_grounding(const std::string& index_dir, const std::string& pairs_pa
 }
 
 
+int cmd_chunk(const std::string& input_path, const std::string& out_path,
+              nanorag::ChunkerConfig cfg) {
+    auto chunks = nanorag::chunk_path(input_path, cfg);
+    if (chunks.empty()) {
+        throw std::runtime_error("chunk: no chunks produced from " + input_path);
+    }
+    // Ensure parent directory exists.
+    {
+        fs::path outp(out_path);
+        if (outp.has_parent_path() && !outp.parent_path().empty()) {
+            fs::create_directories(outp.parent_path());
+        }
+    }
+    nanorag::write_chunks_tsv(chunks, out_path);
+    std::cout << "chunk: wrote " << chunks.size() << " chunks → " << out_path
+              << " strategy=" << nanorag::chunk_strategy_name(cfg.strategy)
+              << " max_chars=" << cfg.max_chars << " overlap=" << cfg.overlap_chars << "\n";
+    // Preview first few
+    const std::size_t preview = std::min<std::size_t>(3, chunks.size());
+    for (std::size_t i = 0; i < preview; ++i) {
+        const auto& c = chunks[i];
+        std::string t = c.text;
+        if (t.size() > 100) {
+            t = t.substr(0, 97) + "...";
+        }
+        std::cout << "  [" << c.id << "] source=" << c.source << " chars=" << c.text.size()
+                  << " " << t << "\n";
+    }
+    return 0;
+}
+
 int cmd_eval_suite(const std::string& data_root, bool ablations,
                    nanorag::RetrieveMode retrieve_mode) {
     auto paths = nanorag::eval::default_demo_paths(data_root);
@@ -501,6 +537,40 @@ int main(int argc, char** argv) {
         const std::string cmd = argv[1];
         if (cmd == "smoke") {
             return cmd_smoke();
+        }
+        if (cmd == "chunk") {
+            std::string input, out;
+            nanorag::ChunkerConfig cfg;
+            for (int i = 2; i < argc; ++i) {
+                const std::string a = argv[i];
+                if (a == "--input" || a == "-i") {
+                    input = require_arg(i, argc, argv, "--input");
+                } else if (a == "--out" || a == "-o") {
+                    out = require_arg(i, argc, argv, "--out");
+                } else if (a == "--strategy") {
+                    cfg.strategy =
+                        nanorag::parse_chunk_strategy(require_arg(i, argc, argv, "--strategy"));
+                } else if (a == "--max-chars") {
+                    cfg.max_chars =
+                        static_cast<std::size_t>(std::stoull(require_arg(i, argc, argv, "--max-chars")));
+                } else if (a == "--overlap") {
+                    cfg.overlap_chars =
+                        static_cast<std::size_t>(std::stoull(require_arg(i, argc, argv, "--overlap")));
+                } else if (a == "--min-chars") {
+                    cfg.min_chars =
+                        static_cast<std::size_t>(std::stoull(require_arg(i, argc, argv, "--min-chars")));
+                } else if (a == "--start-id") {
+                    cfg.start_id = std::stoll(require_arg(i, argc, argv, "--start-id"));
+                } else if (a == "--source") {
+                    cfg.source = require_arg(i, argc, argv, "--source");
+                } else {
+                    throw std::runtime_error("unknown arg: " + a);
+                }
+            }
+            if (input.empty() || out.empty()) {
+                throw std::runtime_error("chunk requires --input and --out");
+            }
+            return cmd_chunk(input, out, cfg);
         }
         if (cmd == "ingest") {
             std::string chunks, out, pairs;
