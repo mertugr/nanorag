@@ -35,3 +35,53 @@ What body is the primary natural satellite of Terra?	7
 What body orbits Terra as its moon?	7
 What data structure enables sublinear neighbor queries in continuous embedding spaces?	8
 Which graph family is used for fast approximate search over high-dimensional vectors?	8
+Which small predator of mice often lives indoors with families?	0
+What soft-furred housemate kneads blankets when calm?	0
+Name the domestic animal that hunts rodents around the home?	0
+Which household companion is known for silent graceful walking?	0
+What mammal curls up on sunny windowsills for hours?	0
+Which pet species meows to request food from owners?	0
+What clawed companion prefers elevated perches at home?	0
+Which animal is a felid kept as a common pet?	0
+Which animal wags its body when greeting its owner?	1
+What pet is trained for fetch and outdoor exercise?	1
+Which canid companion guards the door and loves walks?	1
+What domestic animal howls or barks at strangers?	1
+Which pet often sleeps near the front entrance of a home?	1
+What animal is a familiaris species living with people?	1
+Which four-legged friend is used for herding and companionship?	1
+Which animals have feathers and can soar above trees?	2
+What creatures lay eggs in elevated nests made of twigs?	2
+Which vertebrates use wings for powered aerial motion?	2
+Name animals that tweet or chirp at dawn near gardens?	2
+What group includes both tiny sparrows and large raptors?	2
+What library implements HNSW style neighbor graphs in pure C++?	3
+Which project offers exact brute force plus approximate ANN indexes?	3
+What toolkit stores vectors in memory for similarity search?	3
+Which C++ ANN stack supports inverted files and graph indexes?	3
+What open library does nearest-neighbor scan without GPU kernels?	3
+Which runtime executes decoder-only transformers with no torch?	4
+What engine quantizes linear layers for local token generation?	4
+Which C++ project loads custom LLM checkpoints from disk?	4
+What stack samples tokens for instruct-style generation offline?	4
+Which dependency-free inference engine targets small Llama-like models?	4
+What layer retrieves passages before asking a local language model?	5
+Which system embeds chunks and runs grounded QA with citations?	5
+What application sits above ANN search and an LLM runtime?	5
+Which project wires retrieval scores into extractive answers?	5
+What stack builds a local RAG loop over owned libraries?	5
+At standard pressure what kelvin value freezes pure water?	6
+When does liquid H2O become vapor at one atmosphere?	6
+What boiling temperature applies to pure water at sea-level pressure?	6
+At 1 atm which kelvin mark is the ice point of pure H2O?	6
+What scientific temperatures describe phase changes of pure water?	6
+How many days does Terra need for one solar orbit?	7
+What natural satellite accompanies Earth on its path around Sol?	7
+Which planet in our system has a single major moon?	7
+What body completes roughly three hundred sixty five day years?	7
+Name the primary companion moon of planet Earth?	7
+Which graph design supports fast approximate vector neighbor search?	8
+What structure trades link memory for sublinear high-dim queries?	8
+Which proximity graph index navigates hierarchical ANN connections?	8
+What algorithm class locates similar embeddings without always scanning all rows?	8
+Which graph-based ANN method is hierarchical and navigable?	8

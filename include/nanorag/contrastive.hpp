@@ -2,12 +2,11 @@
 
 // Supervised contrastive dual encoder (pure C++17).
 //
-// contrastive-v2: same stable mean-pool InfoNCE as v1, plus:
-//   - default dim 128, momentum SGD, cosine LR schedule
-//   - hashed char n-grams (3/4) + token bigrams in the mean pool
-//   - expanded synonymy training pairs (data/)
-//
-// Format: .nctr magic NCTR; version 2 (v1 still loadable as identity-feature model).
+// contrastive-v2: mean-pool InfoNCE + optional hard-negative second pass.
+//   - hashed char n-grams (3/4) + token bigrams
+//   - hard-neg mining (top-k wrong docs) after warmup
+//   - query–query pull for same gold id (paraphrase consistency)
+// Format: .nctr magic NCTR; version 2 (v1 still loadable).
 
 #include "nanorag/chunk_store.hpp"
 #include "nanorag/embedder.hpp"
@@ -53,6 +52,13 @@ struct ContrastiveTrainConfig {
     float bigram_weight = 0.45f;
     /// Accepted for API compat; tables use dim for both when emb_dim==0.
     std::size_t emb_dim = 0;
+    /// Hard-negative second pass over top-k non-positive docs (0 disables).
+    int hard_neg_k = 5;
+    int hard_neg_start_epoch = 100;
+    float hard_neg_temperature = 0.04f;
+    float hard_neg_loss_weight = 0.15f;
+    /// Paraphrase pull for same gold id (keep low; high values break OOD refuse).
+    float query_query_weight = 0.0f;
 };
 
 inline std::vector<TrainPair> load_train_pairs(const std::string& path) {
@@ -204,19 +210,25 @@ public:
             std::vector<std::string> q;
             std::vector<std::string> pos;
             std::int64_t pos_id = 0;
+            std::size_t orig_i = 0;
         };
         std::vector<PairTok> pt;
         pt.reserve(pairs.size());
-        for (const auto& p : pairs) {
+        std::unordered_map<std::int64_t, std::vector<std::size_t>> same_doc_pairs;
+        for (std::size_t pi = 0; pi < pairs.size(); ++pi) {
+            const auto& p = pairs[pi];
             PairTok x;
             x.q = detail::simple_tokenize(p.query);
             x.pos = detail::simple_tokenize(store.get(p.pos_id).text);
             x.pos_id = p.pos_id;
+            x.orig_i = pi;
             if (x.q.empty() || x.pos.empty()) {
                 throw std::invalid_argument("ContrastiveModel: empty tokens after tokenize");
             }
+            same_doc_pairs[p.pos_id].push_back(pi);
             pt.push_back(std::move(x));
         }
+        const std::vector<PairTok> pt_by_orig = pt;
         std::vector<std::vector<std::string>> doc_tok(chunks.size());
         for (std::size_t i = 0; i < chunks.size(); ++i) {
             doc_tok[i] = detail::simple_tokenize(chunks[i].text);
@@ -274,7 +286,14 @@ public:
                     for (std::size_t d = 0; d < m.dim_; ++d) {
                         dot += qv[d] * dv[d];
                     }
-                    logits.push_back(dot / cfg.temperature);
+                    float logit = dot / cfg.temperature;
+                    if (logit > 40.f) {
+                        logit = 40.f;
+                    }
+                    if (logit < -40.f) {
+                        logit = -40.f;
+                    }
+                    logits.push_back(logit);
                     dvs.push_back(std::move(dv));
                 }
                 if (pos_index < 0) {
@@ -319,6 +338,141 @@ public:
                 }
                 if (!m.bigram_emb_.empty()) {
                     apply(m.bigram_emb_, vel_bi, g_bi, lr);
+                }
+
+                // Hard-negative second pass (skip when positive is NO_EVIDENCE sentinel:
+                // keep OOD→sentinel ranking calibrated by the primary full softmax only).
+                if (cfg.hard_neg_k > 0 && epoch >= cfg.hard_neg_start_epoch &&
+                    cfg.hard_neg_loss_weight > 0.f && pair.pos_id != -1) {
+                    auto qv_h = m.pool_tokens(pair.q);
+                    std::vector<std::pair<float, std::size_t>> scored;
+                    scored.reserve(chunks.size());
+                    for (std::size_t j = 0; j < chunks.size(); ++j) {
+                        if (chunks[j].id == pair.pos_id) {
+                            continue;
+                        }
+                        // Do not mine the refuse sentinel as a "hard negative" for real docs —
+                        // that would push in-domain queries away from the refuse region unevenly.
+                        if (chunks[j].id == -1) {
+                            continue;
+                        }
+                        auto dv = m.pool_tokens(doc_tok[j]);
+                        float dot = 0.f;
+                        for (std::size_t d = 0; d < m.dim_; ++d) {
+                            dot += qv_h[d] * dv[d];
+                        }
+                        scored.emplace_back(dot, j);
+                    }
+                    if (!scored.empty()) {
+                        const std::size_t hk =
+                            std::min(static_cast<std::size_t>(cfg.hard_neg_k), scored.size());
+                        std::partial_sort(
+                            scored.begin(), scored.begin() + static_cast<std::ptrdiff_t>(hk),
+                            scored.end(),
+                            [](const auto& a, const auto& b) { return a.first > b.first; });
+                        std::vector<std::size_t> hard_rows;
+                        hard_rows.push_back(id_to_row.at(pair.pos_id));
+                        for (std::size_t h = 0; h < hk; ++h) {
+                            hard_rows.push_back(scored[h].second);
+                        }
+                        const float ht = cfg.hard_neg_temperature > 0.f ? cfg.hard_neg_temperature
+                                                                         : cfg.temperature;
+                        auto qv2 = m.pool_tokens(pair.q);
+                        std::vector<std::vector<float>> dvs2;
+                        std::vector<float> logits2;
+                        int pos2 = -1;
+                        for (std::size_t ci = 0; ci < hard_rows.size(); ++ci) {
+                            const std::size_t row = hard_rows[ci];
+                            if (chunks[row].id == pair.pos_id) {
+                                pos2 = static_cast<int>(ci);
+                            }
+                            auto dv = m.pool_tokens(doc_tok[row]);
+                            float dot = 0.f;
+                            for (std::size_t d = 0; d < m.dim_; ++d) {
+                                dot += qv2[d] * dv[d];
+                            }
+                            float logit = dot / ht;
+                            if (logit > 40.f) {
+                                logit = 40.f;
+                            }
+                            if (logit < -40.f) {
+                                logit = -40.f;
+                            }
+                            logits2.push_back(logit);
+                            dvs2.push_back(std::move(dv));
+                        }
+                        if (pos2 >= 0) {
+                            float mx2 = *std::max_element(logits2.begin(), logits2.end());
+                            std::vector<float> prob2(logits2.size());
+                            float sum2 = 0.f;
+                            for (std::size_t i = 0; i < logits2.size(); ++i) {
+                                prob2[i] = std::exp(logits2[i] - mx2);
+                                sum2 += prob2[i];
+                            }
+                            for (float& p : prob2) {
+                                p /= sum2;
+                            }
+                            std::vector<float> gq2(m.dim_, 0.f);
+                            std::vector<std::vector<float>> gd2(
+                                dvs2.size(), std::vector<float>(m.dim_, 0.f));
+                            for (std::size_t i = 0; i < logits2.size(); ++i) {
+                                float g_logit = prob2[i];
+                                if (static_cast<int>(i) == pos2) {
+                                    g_logit -= 1.f;
+                                }
+                                g_logit = g_logit * cfg.hard_neg_loss_weight / ht;
+                                for (std::size_t d = 0; d < m.dim_; ++d) {
+                                    gq2[d] += g_logit * dvs2[i][d];
+                                    gd2[i][d] += g_logit * qv2[d];
+                                }
+                            }
+                            std::vector<float> g_emb2(m.emb_.size(), 0.f);
+                            std::vector<float> g_ng2(m.ngram_emb_.size(), 0.f);
+                            std::vector<float> g_bi2(m.bigram_emb_.size(), 0.f);
+                            m.accum_grad(pair.q, gq2, g_emb2, g_ng2, g_bi2);
+                            for (std::size_t i = 0; i < hard_rows.size(); ++i) {
+                                m.accum_grad(doc_tok[hard_rows[i]], gd2[i], g_emb2, g_ng2, g_bi2);
+                            }
+                            apply(m.emb_, vel_emb, g_emb2, lr);
+                            if (!m.ngram_emb_.empty()) {
+                                apply(m.ngram_emb_, vel_ng, g_ng2, lr);
+                            }
+                            if (!m.bigram_emb_.empty()) {
+                                apply(m.bigram_emb_, vel_bi, g_bi2, lr);
+                            }
+                        }
+                    }
+                }
+
+                // Query–query paraphrase attraction (same gold id; skip NO_EVIDENCE group).
+                if (cfg.query_query_weight > 0.f && pair.pos_id != -1) {
+                    const auto& group = same_doc_pairs[pair.pos_id];
+                    if (group.size() >= 2) {
+                        std::uniform_int_distribution<std::size_t> gd(0, group.size() - 1);
+                        const std::size_t other_idx = group[gd(rng)];
+                        if (pt_by_orig[other_idx].orig_i != pair.orig_i) {
+                            const auto& oq = pt_by_orig[other_idx].q;
+                            auto ea = m.pool_tokens(pair.q);
+                            auto eb = m.pool_tokens(oq);
+                            std::vector<float> g_embq(m.emb_.size(), 0.f);
+                            std::vector<float> g_ngq(m.ngram_emb_.size(), 0.f);
+                            std::vector<float> g_biq(m.bigram_emb_.size(), 0.f);
+                            std::vector<float> ga(m.dim_), gb(m.dim_);
+                            for (std::size_t d = 0; d < m.dim_; ++d) {
+                                ga[d] = -cfg.query_query_weight * eb[d];
+                                gb[d] = -cfg.query_query_weight * ea[d];
+                            }
+                            m.accum_grad(pair.q, ga, g_embq, g_ngq, g_biq);
+                            m.accum_grad(oq, gb, g_embq, g_ngq, g_biq);
+                            apply(m.emb_, vel_emb, g_embq, lr);
+                            if (!m.ngram_emb_.empty()) {
+                                apply(m.ngram_emb_, vel_ng, g_ngq, lr);
+                            }
+                            if (!m.bigram_emb_.empty()) {
+                                apply(m.bigram_emb_, vel_bi, g_biq, lr);
+                            }
+                        }
+                    }
                 }
             }
         }

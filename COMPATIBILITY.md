@@ -12,7 +12,7 @@ Optional **package** versions apply when using `find_package` / installed prefix
 | Artifact | Version field | Notes |
 |----------|---------------|--------|
 | `meta.txt` | `nanorag_index_meta_version=2` | `n_real_chunks`, `has_no_evidence`; load validates kind/metric/sizes |
-| `embeddings.nctr` | format v2 (`NCTR`) | contrastive-v2 (MLP + ngrams); v1 still loadable |
+| `embeddings.nctr` | format v2 (`NCTR`) | contrastive-v2 (ngrams+bigrams; hard-neg is train-time only); v1 still loadable |
 | `embeddings.nw2v` | format v1 (`NW2V`) | word2vec-v1 |
 | `*.tann` | tinyann binary | **host-endian only** (no endian marker) |
 

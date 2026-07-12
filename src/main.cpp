@@ -141,12 +141,16 @@ int cmd_smoke() {
     };
 
     nanorag::ContrastiveTrainConfig cfg;
-    cfg.dim = 96;
-    cfg.epochs = 380;
+    cfg.dim = 128;
+    cfg.epochs = 320;
     cfg.lr = 0.08f;
     cfg.momentum = 0.9f;
     cfg.seed = 42;
     cfg.temperature = 0.05f;
+    cfg.hard_neg_k = 5;
+    cfg.hard_neg_start_epoch = 80;
+    cfg.hard_neg_loss_weight = 0.15f;
+    cfg.query_query_weight = 0.0f;
     auto gcfg = nanorag::default_grounding_config();
 
     // In-domain paraphrase without NO_EVIDENCE (stable across platforms).
@@ -464,6 +468,14 @@ int cmd_eval_suite(const std::string& data_root, bool ablations,
     cfg.momentum = 0.9f;
     cfg.temperature = 0.05f;
     cfg.seed = 7;
+    cfg.hard_neg_k = 5;
+    cfg.hard_neg_start_epoch = 100;
+    cfg.hard_neg_loss_weight = 0.15f;
+    cfg.query_query_weight = 0.0f;
+    cfg.ngram_weight = 0.35f;
+    cfg.bigram_weight = 0.45f;
+    cfg.ngram_buckets = 4096;
+    cfg.bigram_buckets = 4096;
     auto primary = nanorag::eval::build_contrastive_from_paths(paths, cfg, true);
     primary.set_retrieve_mode(retrieve_mode);
     auto report = nanorag::eval::run_full_eval(std::move(primary), paths,

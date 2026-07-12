@@ -635,7 +635,7 @@ inline Retriever build_contrastive_from_paths(const EvalPaths& paths,
                                               bool inject_no_evidence = true) {
     auto store = ChunkStore::load(paths.chunks);
     auto pairs = load_train_pairs(paths.train_pairs);
-    // contrastive-v2 defaults
+    // contrastive-v2 + hard-neg training defaults
     if (cfg.dim == 0) {
         cfg.dim = 128;
     }

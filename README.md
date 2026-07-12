@@ -10,7 +10,7 @@ Local **C++17 RAG** orchestrator over owned libraries:
 
 No Hugging Face or third-party ML runtimes on the default path.
 
-**Status:** Phase 0 sealed · Phase 1 packaging · Phase 2 eval foundation · contrastive-v2 dense encoder. Honest hard retrieval (no train synonym leak) is still weak — not production dual-encoder quality.
+**Status:** Phase 0 sealed · Phase 1 packaging · Phase 2 eval · contrastive-v2 with **hard-negative mining** + expanded train pairs (see [docs/EMBEDDER_HARDNEG.md](docs/EMBEDDER_HARDNEG.md)). Hard R@1 moved off ~0.17 on the integrity hard set; still below large dual-encoder quality.
 
 ---
 
@@ -33,7 +33,7 @@ optional nanollm generate (validated; falls back if ungrounded)
 
 | ID | Learning | Use |
 |----|----------|-----|
-| `contrastive-v2` | InfoNCE dual encoder: word+char-ngram+bigram pool → MLP → L2 | **Default** |
+| `contrastive-v2` | InfoNCE + hard-neg mining + query–query pull; token+ngram+bigram pool → L2 | **Default** |
 | `contrastive-v1` | Legacy mean-pool BOW (load only) | Old indexes |
 | `word2vec-v1` | Skip-gram on chunk text | Ablation |
 | `hashing-v1` | Feature hashing | Ablation / tests |
