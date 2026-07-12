@@ -504,6 +504,8 @@ public:
         if (!out) {
             throw std::runtime_error("ContrastiveModel::save: cannot open " + path);
         }
+        // Always serialize the current on-disk payload (v2). Loaded v1 models must
+        // upgrade format_version_ after a successful write so id() / meta match.
         out.write(kContrastiveMagic, 4);
         write_u32(out, kContrastiveFormatVersion);
         write_u32(out, static_cast<std::uint32_t>(dim_));
@@ -528,6 +530,8 @@ public:
         if (!out) {
             throw std::runtime_error("ContrastiveModel::save: write failed");
         }
+        // Logical const: payload is v2; keep in-memory version aligned with file + id().
+        format_version_ = kContrastiveFormatVersion;
     }
 
     static ContrastiveModel load(const std::string& path) {
@@ -596,7 +600,8 @@ public:
     }
 
 private:
-    std::uint32_t format_version_ = kContrastiveFormatVersion;
+    /// Mutable so const save() can upgrade loaded v1 models after writing v2 bytes.
+    mutable std::uint32_t format_version_ = kContrastiveFormatVersion;
     std::size_t dim_ = 0;
     std::size_t ngram_buckets_ = 0;
     std::size_t bigram_buckets_ = 0;

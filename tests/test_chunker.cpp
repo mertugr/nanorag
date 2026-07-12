@@ -277,6 +277,20 @@ int main() {
         CHECK(has_qumquat);
     }
 
+    // issue #16: --start-id -1 / negative start_id fails closed
+    {
+        ChunkerConfig cfg;
+        cfg.strategy = ChunkStrategy::Paragraph;
+        cfg.start_id = -1;
+        bool threw = false;
+        try {
+            (void)chunk_text("Hello world paragraph with enough text.", cfg, "t");
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+
     // short pending sentence before a long unit survives packing
     {
         ChunkerConfig cfg;

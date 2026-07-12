@@ -368,12 +368,22 @@ inline std::string join_source(const std::string& base, const std::string& part)
 
 }  // namespace chunker_detail
 
+/// Reject reserved / negative user chunk ids early (ChunkStore also enforces).
+inline void validate_chunker_start_id(std::int64_t start_id) {
+    if (start_id < 0) {
+        throw std::invalid_argument(
+            "chunker: start_id must be >= 0 (negative ids are reserved for the system "
+            "NO_EVIDENCE sentinel at -1)");
+    }
+}
+
 /// Chunk a single text blob into Chunk records.
 inline std::vector<Chunk> chunk_text(const std::string& text, const ChunkerConfig& cfg,
                                      const std::string& source_override = {}) {
     if (cfg.max_chars == 0) {
         throw std::invalid_argument("chunk_text: max_chars must be > 0");
     }
+    validate_chunker_start_id(cfg.start_id);
     const std::string src_base = source_override.empty() ? cfg.source : source_override;
     std::vector<std::string> pieces;
 
@@ -491,6 +501,7 @@ inline std::vector<Chunk> chunk_file(const std::string& path, ChunkerConfig cfg,
 /// Chunk a file or recursively all text files under a directory.
 inline std::vector<Chunk> chunk_path(const std::string& path, ChunkerConfig cfg) {
     namespace fs = std::filesystem;
+    validate_chunker_start_id(cfg.start_id);
     const fs::path p(path);
     if (!fs::exists(p)) {
         throw std::runtime_error("chunk_path: path does not exist: " + path);

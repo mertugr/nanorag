@@ -293,6 +293,14 @@ public:
         if (inject_no_evidence) {
             if (!store.contains(kNoEvidenceId)) {
                 store.add({kNoEvidenceId, "system", kNoEvidenceText});
+            } else {
+                // Fail closed: never treat user-owned -1 as the refuse sentinel.
+                const Chunk& ne = store.get(kNoEvidenceId);
+                if (ne.source != "system" || ne.text != kNoEvidenceText) {
+                    throw std::invalid_argument(
+                        "build_contrastive: chunk id -1 is reserved for the system NO_EVIDENCE "
+                        "sentinel; existing chunk does not match system text/source");
+                }
             }
             // Out-of-scope + realistic near-misses map to the sentinel.
             // Oversample vs in-domain pairs so expanded synonym train does not drown refuse.
