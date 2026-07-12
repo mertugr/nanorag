@@ -376,6 +376,65 @@ int main() {
         std::cout << "save rejected >64KB token (no silent corruption)\n";
     }
 
+    // --- issue #13: loaded v1 re-save upgrades format_version_ so id/meta match file ---
+    {
+        const auto dir = fs::temp_directory_path() / "nanorag_ctr_v1_resave";
+        fs::create_directories(dir);
+        const auto v1_path = (dir / "legacy.nctr").string();
+        // Minimal NCTR v1: magic, ver=1, dim=2, V=1, token "x", emb [1,0]
+        {
+            std::ofstream out(v1_path, std::ios::binary);
+            const char magic[4] = {'N', 'C', 'T', 'R'};
+            out.write(magic, 4);
+            auto wu32 = [&](std::uint32_t v) {
+                out.write(reinterpret_cast<const char*>(&v), 4);
+            };
+            auto wu16 = [&](std::uint16_t v) {
+                out.write(reinterpret_cast<const char*>(&v), 2);
+            };
+            wu32(1);  // format v1
+            wu32(2);  // dim
+            wu32(1);  // vocab size
+            wu16(1);
+            out.write("x", 1);
+            float emb[2] = {1.f, 0.f};
+            out.write(reinterpret_cast<const char*>(emb), sizeof(emb));
+            CHECK(static_cast<bool>(out));
+        }
+        auto m = nanorag::ContrastiveModel::load(v1_path);
+        CHECK(m.format_version() == nanorag::kContrastiveFormatVersionV1);
+        nanorag::ContrastiveEmbedder emb_v1(std::move(m));
+        CHECK(emb_v1.id() == std::string(nanorag::kContrastiveEmbedderIdV1));
+
+        const auto v2_path = (dir / "upgraded.nctr").string();
+        emb_v1.save(v2_path);
+        // In-memory id must now match the v2 bytes on disk (meta uses id() after save).
+        CHECK(emb_v1.model().format_version() == nanorag::kContrastiveFormatVersion);
+        CHECK(emb_v1.id() == std::string(nanorag::kContrastiveEmbedderId));
+
+        auto reloaded = nanorag::ContrastiveEmbedder::load(v2_path);
+        CHECK(reloaded.model().format_version() == nanorag::kContrastiveFormatVersion);
+        CHECK(reloaded.id() == std::string(nanorag::kContrastiveEmbedderId));
+        CHECK(reloaded.id() == emb_v1.id());
+        std::cout << "contrastive v1 re-save upgrades format_version (issue #13)\n";
+    }
+
+    // --- issue #16: ChunkStore rejects user -1; allows system sentinel ---
+    {
+        nanorag::ChunkStore s;
+        bool threw = false;
+        try {
+            s.add({-1, "docs", "user owned negative id"});
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        CHECK(threw);
+        s.add({nanorag::kReservedNoEvidenceChunkId, nanorag::kReservedNoEvidenceSource,
+               nanorag::kReservedNoEvidenceText});
+        CHECK(s.contains(-1));
+        std::cout << "ChunkStore reserves id -1 for NO_EVIDENCE sentinel (issue #16)\n";
+    }
+
     if (g_fails) {
         std::cerr << g_fails << " failure(s)\n";
         return 1;

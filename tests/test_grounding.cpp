@@ -328,6 +328,70 @@ int main() {
         CHECK(pizza.answer == std::string(nanorag::kDontKnowAnswer));
     }
 
+    // --- issue #17: empty content-token answers fail grounding (not vacuous pass) ---
+    {
+        nanorag::GroundingConfig cfg = nanorag::default_grounding_config();
+        CHECK(cfg.require_citations);
+        std::vector<nanorag::RetrievedChunk> used = {
+            {6, 0.9f, "a", "Felis catus is a small carnivorous mammal."}};
+        // Citation-only / stopword-only answers have no content tokens after strip.
+        CHECK(nanorag::content_support_ratio("Yes. [#6]", used) == 0.0);
+        CHECK(nanorag::content_support_ratio("[#6]", used) == 0.0);
+        CHECK(nanorag::content_support_ratio("Yes. No. [#6]", used) == 0.0);
+        auto yes = nanorag::validate_grounding("Yes. [#6]", used, cfg);
+        CHECK(!yes.ok);
+        auto bare = nanorag::validate_grounding("[#6]", used, cfg);
+        CHECK(!bare.ok);
+        // Exact refuse still ok (handled before content_support).
+        CHECK(nanorag::validate_grounding(nanorag::kDontKnowAnswer, {}, cfg).ok);
+        CHECK(nanorag::validate_grounding(nanorag::kDontKnowAnswer, used, cfg).ok);
+        // Real content still passes when grounded.
+        CHECK(nanorag::validate_grounding("Felis catus is a small carnivorous mammal. [#6]", used,
+                                          cfg)
+                  .ok);
+    }
+
+    // --- issue #16: user chunk id -1 rejected; system sentinel allowed ---
+    {
+        nanorag::ChunkStore s;
+        bool rejected = false;
+        try {
+            s.add({-1, "user", "this is a real user passage that collides with sentinel"});
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        CHECK(rejected);
+        CHECK(!s.contains(-1));
+
+        bool rejected_other_neg = false;
+        try {
+            s.add({-2, "user", "other negative id"});
+        } catch (const std::invalid_argument&) {
+            rejected_other_neg = true;
+        }
+        CHECK(rejected_other_neg);
+
+        // Official system sentinel inject succeeds.
+        s.add({nanorag::kNoEvidenceId, "system", nanorag::kNoEvidenceText});
+        CHECK(s.contains(nanorag::kNoEvidenceId));
+        CHECK(s.get(nanorag::kNoEvidenceId).text == std::string(nanorag::kNoEvidenceText));
+
+        // build_contrastive injects sentinel when missing.
+        nanorag::ChunkStore s2;
+        s2.add({0, "a", "cats purr when content"});
+        std::vector<nanorag::TrainPair> pairs = {{"which pet purrs", 0}};
+        nanorag::ContrastiveTrainConfig tcfg;
+        tcfg.dim = 8;
+        tcfg.epochs = 1;
+        tcfg.seed = 1;
+        tcfg.hard_neg_k = 0;
+        auto ret = nanorag::Retriever::build_contrastive(s2, pairs, tcfg, {}, true);
+        CHECK(ret.store().contains(nanorag::kNoEvidenceId));
+        CHECK(ret.store().get(nanorag::kNoEvidenceId).source == "system");
+        CHECK(ret.store().get(nanorag::kNoEvidenceId).text ==
+              std::string(nanorag::kNoEvidenceText));
+    }
+
     if (g_fails) {
         std::cerr << g_fails << " failure(s)\n";
         return 1;

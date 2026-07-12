@@ -3,6 +3,9 @@
 // Simple id → chunk text store. Phase 0 format: one record per line:
 //   <int64 id>\t<source>\t<text...>
 // Tab-separated; text may contain spaces but not tabs/newlines.
+//
+// Negative ids are reserved for system use. The only allowed negative chunk is
+// the NO_EVIDENCE sentinel at id -1 (source "system", fixed refuse text).
 
 #include <cstdint>
 #include <fstream>
@@ -15,17 +18,38 @@
 
 namespace nanorag {
 
+/// Must match kNoEvidenceId / kNoEvidenceText in grounding.hpp (kept here so
+/// ChunkStore does not pull the full grounding dependency).
+inline constexpr std::int64_t kReservedNoEvidenceChunkId = -1;
+inline constexpr const char* kReservedNoEvidenceSource = "system";
+inline constexpr const char* kReservedNoEvidenceText =
+    "NO_EVIDENCE: the corpus contains no answer to this question.";
+
 struct Chunk {
     std::int64_t id = 0;
     std::string source;
     std::string text;
 };
 
+inline bool is_system_no_evidence_chunk(const Chunk& c) {
+    return c.id == kReservedNoEvidenceChunkId && c.source == kReservedNoEvidenceSource &&
+           c.text == kReservedNoEvidenceText;
+}
+
 class ChunkStore {
 public:
     void clear() { by_id_.clear(); order_.clear(); }
 
     void add(Chunk c) {
+        // Reserve all negative ids; only the official NO_EVIDENCE sentinel may use -1.
+        if (c.id < 0) {
+            if (!is_system_no_evidence_chunk(c)) {
+                throw std::invalid_argument(
+                    "ChunkStore: negative chunk ids are reserved for the system NO_EVIDENCE "
+                    "sentinel (id=-1, source=system); rejected id " +
+                    std::to_string(c.id));
+            }
+        }
         if (by_id_.count(c.id)) {
             throw std::invalid_argument("ChunkStore: duplicate id " + std::to_string(c.id));
         }

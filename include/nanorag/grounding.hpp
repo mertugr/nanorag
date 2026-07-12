@@ -302,8 +302,10 @@ inline double content_support_ratio(const std::string& answer,
         cleaned = cleaned.substr(prefix.size());
     }
     auto atoks = content_tokens(cleaned);
+    // Fail closed: citation-only / stopword-only answers (e.g. "Yes. [#6]") are not
+    // supported content. Exact refuse is handled separately in validate_grounding.
     if (atoks.empty()) {
-        return 1.0;
+        return 0.0;
     }
     auto ctx_toks = content_tokens(context_blob(used));
     std::unordered_set<std::string> ctx(ctx_toks.begin(), ctx_toks.end());
