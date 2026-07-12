@@ -239,6 +239,65 @@ int main() {
         }
     }
 
+    // degenerate window narrower than one codepoint: whole codepoint, valid UTF-8
+    {
+        ChunkerConfig cfg;
+        cfg.strategy = ChunkStrategy::Window;
+        cfg.max_chars = 1;  // narrower than a 2-byte codepoint
+        cfg.overlap_chars = 0;
+        cfg.min_chars = 1;
+        cfg.prefer_word_break = false;
+        std::string text;
+        for (int i = 0; i < 12; ++i) {
+            text += "\xc3\xa7";  // ç
+        }
+        auto chunks = chunk_text(text, cfg);
+        CHECK(!chunks.empty());
+        for (const auto& c : chunks) {
+            CHECK(valid_utf8(c.text));
+        }
+    }
+
+    // middle window pieces are kept even when shorter than min_chars
+    {
+        ChunkerConfig cfg;
+        cfg.strategy = ChunkStrategy::Window;
+        cfg.max_chars = 20;
+        cfg.overlap_chars = 0;
+        cfg.min_chars = 10;
+        std::string text = std::string(20, 'A') + " qumquat " + std::string(30, 'B') +
+                           " tail ending is long enough";
+        auto chunks = chunk_text(text, cfg);
+        bool has_qumquat = false;
+        for (const auto& c : chunks) {
+            if (c.text.find("qumquat") != std::string::npos) {
+                has_qumquat = true;
+            }
+        }
+        CHECK(has_qumquat);
+    }
+
+    // short pending sentence before a long unit survives packing
+    {
+        ChunkerConfig cfg;
+        cfg.strategy = ChunkStrategy::Sentence;
+        cfg.max_chars = 30;
+        cfg.overlap_chars = 0;
+        cfg.min_chars = 12;
+        const std::string text =
+            "A first proper sentence here. Tiny bit. "
+            "This single sentence is deliberately much longer than the thirty "
+            "character packing limit so it gets windowed.";
+        auto chunks = chunk_text(text, cfg);
+        bool has_tiny = false;
+        for (const auto& c : chunks) {
+            if (c.text.find("Tiny bit") != std::string::npos) {
+                has_tiny = true;
+            }
+        }
+        CHECK(has_tiny);
+    }
+
     if (g_fails) {
         std::cerr << g_fails << " failure(s)\n";
         return 1;

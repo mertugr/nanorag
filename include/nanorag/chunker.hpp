@@ -216,15 +216,22 @@ inline std::vector<std::string> window_text(const std::string& text, const Chunk
             }
             end = utf8_floor(clean, end);
             if (end <= i) {
-                // Degenerate (window narrower than one codepoint): accept a raw split.
-                end = std::min(i + cfg.max_chars, clean.size());
+                // Degenerate (window narrower than one codepoint): take the whole
+                // codepoint rather than emit invalid bytes (may exceed max_chars by
+                // up to 3 bytes).
+                end = i + 1;
+                while (end < clean.size() &&
+                       (static_cast<unsigned char>(clean[end]) & 0xC0) == 0x80) {
+                    ++end;
+                }
             }
         }
         auto piece = sanitize_chunk_text(clean.substr(i, end - i));
-        if (piece.size() >= cfg.min_chars || out.empty()) {
-            if (!piece.empty()) {
-                out.push_back(std::move(piece));
-            }
+        // min_chars prunes only the trailing fragment — middle windows are never
+        // re-emitted, so dropping them would lose text.
+        const bool is_tail = end >= clean.size();
+        if (!piece.empty() && (!is_tail || piece.size() >= cfg.min_chars || out.empty())) {
+            out.push_back(std::move(piece));
         }
         if (end >= clean.size()) {
             break;
@@ -259,7 +266,17 @@ inline std::vector<std::string> pack_units(const std::vector<std::string>& units
     };
     for (const auto& u : units) {
         if (u.size() > cfg.max_chars) {
-            // Long unit: flush current, then window the unit.
+            // Long unit: flush current, then window the unit. A pending run shorter
+            // than min_chars would be dropped by flush — prepend it to the unit so
+            // its text survives.
+            if (!cur.empty() && cur.size() < cfg.min_chars) {
+                std::string combined = cur + " " + u;
+                cur.clear();
+                for (auto& w : window_text(combined, cfg)) {
+                    out.push_back(std::move(w));
+                }
+                continue;
+            }
             flush();
             for (auto& w : window_text(u, cfg)) {
                 out.push_back(std::move(w));
