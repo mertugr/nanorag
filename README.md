@@ -1,16 +1,19 @@
 # nanorag
 
+**Version:** `0.1.0` · **License:** MIT · **Stack:** [tinyann](https://github.com/mertugr/tinyann) ≥ 0.1.0 · [nanollm](https://github.com/mertugr/nanollm) ≥ 0.4.0  
+**Compatibility:** [COMPATIBILITY.md](COMPATIBILITY.md) (version matrix, formats, endianness)
+
 Local **C++17 RAG** orchestrator over owned libraries:
 
-| Library | Role |
-|---------|------|
-| [tinyann](https://github.com/mertugr/tinyann) | In-memory ANN (HNSW, …) — git submodule |
-| [nanollm](https://github.com/mertugr/nanollm) | From-scratch LLM inference — git submodule |
-| **nanorag** | Chunk store, in-house embedders, retrieval, **grounded** answers |
+| Library | Version | Role |
+|---------|---------|------|
+| [tinyann](https://github.com/mertugr/tinyann) | ≥ 0.1.0 | In-memory ANN (HNSW, …) — git submodule |
+| [nanollm](https://github.com/mertugr/nanollm) | ≥ 0.4.0 | From-scratch LLM inference — git submodule |
+| **nanorag** | **0.1.0** | Chunk store, in-house embedders, retrieval, **grounded** answers |
 
 No Hugging Face or third-party ML runtimes on the default path.
 
-**Status:** Phase 0 sealed · Phase 1 packaging · Phase 2 eval · contrastive-v2 with **hard-negative mining** + expanded train pairs (see [docs/EMBEDDER_HARDNEG.md](docs/EMBEDDER_HARDNEG.md)). Hard R@1 moved off ~0.17 on the integrity hard set; still below large dual-encoder quality.
+**Status:** Phase 0 sealed · Phase 1 packaging · Phase 2 eval · hybrid retrieval · contrastive-v2 with **hard-negative mining** (see [docs/EMBEDDER_HARDNEG.md](docs/EMBEDDER_HARDNEG.md)). Hard R@1 still below large dual-encoder quality.
 
 ---
 
@@ -218,10 +221,13 @@ See `data/demo/eval/README.md`.
 3. **Phase 2** — eval foundation: labeled sets, R@k/MRR, refuse, grounding, ablations
 4. **Phase 2+** — hybrid dense+BM25 retrieval (**this**); stronger embedders next
 5. **Later** — generate/chat parity with nanollm, incremental index, HTTP serve
+
 ## License
 
 MIT for **nanorag** — see [LICENSE](LICENSE).  
 Submodules (also MIT, public):
 
-- [tinyann](https://github.com/mertugr/tinyann) — MIT
-- [nanollm](https://github.com/mertugr/nanollm) — MIT
+- [tinyann](https://github.com/mertugr/tinyann) — MIT · [COMPATIBILITY](https://github.com/mertugr/tinyann/blob/main/COMPATIBILITY.md)
+- [nanollm](https://github.com/mertugr/nanollm) — MIT · [COMPATIBILITY](https://github.com/mertugr/nanollm/blob/main/COMPATIBILITY.md)
+
+Stack matrix and artifact formats: [COMPATIBILITY.md](COMPATIBILITY.md).
