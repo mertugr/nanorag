@@ -17,6 +17,35 @@ static int g_fails = 0;
         }                                                                           \
     } while (0)
 
+static bool valid_utf8(const std::string& s) {
+    std::size_t i = 0;
+    while (i < s.size()) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        std::size_t len = 0;
+        if (c < 0x80) {
+            len = 1;
+        } else if ((c >> 5) == 0x6) {
+            len = 2;
+        } else if ((c >> 4) == 0xE) {
+            len = 3;
+        } else if ((c >> 3) == 0x1E) {
+            len = 4;
+        } else {
+            return false;
+        }
+        if (i + len > s.size()) {
+            return false;
+        }
+        for (std::size_t k = 1; k < len; ++k) {
+            if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) {
+                return false;
+            }
+        }
+        i += len;
+    }
+    return true;
+}
+
 int main() {
     using namespace nanorag;
 
@@ -133,6 +162,81 @@ int main() {
         auto chunks = chunk_path(f.string(), cfg);
         CHECK(!chunks.empty());
         CHECK(chunks[0].source == "sample.txt");
+    }
+
+    // window: word-break snap must not skip text (long unbroken token)
+    {
+        ChunkerConfig cfg;
+        cfg.strategy = ChunkStrategy::Window;
+        cfg.max_chars = 800;
+        cfg.overlap_chars = 100;
+        cfg.min_chars = 5;
+        std::string text;
+        for (int i = 0; i < 50; ++i) {
+            text += "word ";  // 250 chars of breakable words
+        }
+        unsigned x = 12345;  // non-repeating 700-char unbroken token
+        for (int i = 0; i < 700; ++i) {
+            x = x * 1103515245u + 12345u;
+            text += static_cast<char>('a' + (x >> 16) % 26);
+        }
+        text += " closing words after the long token to end the document cleanly";
+        const std::string clean = sanitize_chunk_text(text);
+        auto chunks = chunk_text(text, cfg);
+        CHECK(!chunks.empty());
+        // Every 25-char span of the input must land in some chunk (no silent gaps).
+        bool all_covered = true;
+        for (std::size_t p = 0; p + 25 <= clean.size(); p += 10) {
+            const std::string probe = clean.substr(p, 25);
+            bool found = false;
+            for (const auto& c : chunks) {
+                if (c.text.find(probe) != std::string::npos) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                all_covered = false;
+                break;
+            }
+        }
+        CHECK(all_covered);
+    }
+
+    // window boundaries must not split multi-byte UTF-8 codepoints
+    {
+        ChunkerConfig cfg;
+        cfg.strategy = ChunkStrategy::Window;
+        cfg.max_chars = 21;  // odd byte count → would land mid-codepoint
+        cfg.overlap_chars = 4;
+        cfg.min_chars = 1;
+        cfg.prefer_word_break = false;
+        std::string text;
+        for (int i = 0; i < 60; ++i) {
+            text += "\xc3\xa7\xc3\xb6\xc3\xbc";  // çöü — 2-byte codepoints
+        }
+        auto chunks = chunk_text(text, cfg);
+        CHECK(!chunks.empty());
+        for (const auto& c : chunks) {
+            CHECK(valid_utf8(c.text));
+        }
+    }
+
+    // sentence-pack overlap seed must not split multi-byte codepoints
+    {
+        ChunkerConfig cfg;
+        cfg.strategy = ChunkStrategy::Sentence;
+        cfg.max_chars = 40;
+        cfg.overlap_chars = 7;
+        cfg.min_chars = 1;
+        const std::string text =
+            "Çölde güneş öğlen çok sıcaktır. Gece rüzgârı serin eser. "
+            "Üzüm bağları öğleden sonra gölgelenir. Şölen akşamı görkemliydi.";
+        auto chunks = chunk_text(text, cfg);
+        CHECK(!chunks.empty());
+        for (const auto& c : chunks) {
+            CHECK(valid_utf8(c.text));
+        }
     }
 
     if (g_fails) {

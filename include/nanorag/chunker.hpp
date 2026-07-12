@@ -116,6 +116,15 @@ inline bool is_sentence_end(char c) {
     return c == '.' || c == '!' || c == '?';
 }
 
+/// Byte offset of the UTF-8 sequence start at or before pos (skips continuation bytes),
+/// so substr boundaries never split a multi-byte codepoint.
+inline std::size_t utf8_floor(const std::string& s, std::size_t pos) {
+    while (pos > 0 && pos < s.size() && (static_cast<unsigned char>(s[pos]) & 0xC0) == 0x80) {
+        --pos;
+    }
+    return pos;
+}
+
 /// Split into sentences (keeps trailing punctuation on the sentence).
 inline std::vector<std::string> split_sentences(const std::string& text) {
     std::vector<std::string> out;
@@ -192,18 +201,23 @@ inline std::vector<std::string> window_text(const std::string& text, const Chunk
     if (cfg.max_chars == 0) {
         throw std::invalid_argument("ChunkerConfig.max_chars must be > 0");
     }
-    const std::size_t step =
-        cfg.max_chars > cfg.overlap_chars ? cfg.max_chars - cfg.overlap_chars : cfg.max_chars;
     std::size_t i = 0;
     while (i < clean.size()) {
         std::size_t end = std::min(i + cfg.max_chars, clean.size());
-        if (cfg.prefer_word_break && end < clean.size()) {
-            std::size_t back = end;
-            while (back > i && clean[back] != ' ') {
-                --back;
+        if (end < clean.size()) {
+            if (cfg.prefer_word_break) {
+                std::size_t back = end;
+                while (back > i && clean[back] != ' ') {
+                    --back;
+                }
+                if (back > i + cfg.max_chars / 4) {
+                    end = back;
+                }
             }
-            if (back > i + cfg.max_chars / 4) {
-                end = back;
+            end = utf8_floor(clean, end);
+            if (end <= i) {
+                // Degenerate (window narrower than one codepoint): accept a raw split.
+                end = std::min(i + cfg.max_chars, clean.size());
             }
         }
         auto piece = sanitize_chunk_text(clean.substr(i, end - i));
@@ -215,10 +229,15 @@ inline std::vector<std::string> window_text(const std::string& text, const Chunk
         if (end >= clean.size()) {
             break;
         }
-        i += step;
-        if (i >= clean.size()) {
-            break;
+        // Advance from the actual end — a word-break snap may pull `end` well short of
+        // the nominal window, and stepping from the nominal window would silently skip
+        // the text in between. Keep overlap_chars of context.
+        std::size_t next = end > cfg.overlap_chars ? end - cfg.overlap_chars : 0;
+        next = utf8_floor(clean, next);
+        if (next <= i) {
+            next = end;
         }
+        i = next;
     }
     return out;
 }
@@ -260,7 +279,9 @@ inline std::vector<std::string> pack_units(const std::vector<std::string>& units
             if (cfg.overlap_chars > 0 && !out.empty()) {
                 const auto& prev = out.back();
                 if (prev.size() > cfg.overlap_chars) {
-                    cur = sanitize_chunk_text(prev.substr(prev.size() - cfg.overlap_chars));
+                    const std::size_t seed_start =
+                        utf8_floor(prev, prev.size() - cfg.overlap_chars);
+                    cur = sanitize_chunk_text(prev.substr(seed_start));
                     if (!cur.empty()) {
                         cur.push_back(' ');
                     }
