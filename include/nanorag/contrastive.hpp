@@ -257,8 +257,14 @@ public:
                     }
                 } else {
                     cand_rows.push_back(id_to_row.at(pair.pos_id));
+                    // Never ask for more distinct rows than the store holds — a small
+                    // corpus would otherwise spin forever waiting for an unreachable
+                    // (max_negatives + 1)-th distinct row.
+                    const std::size_t want =
+                        std::min(static_cast<std::size_t>(std::max(0, cfg.max_negatives)) + 1,
+                                 chunks.size());
                     std::uniform_int_distribution<std::size_t> ud(0, chunks.size() - 1);
-                    while (static_cast<int>(cand_rows.size()) < cfg.max_negatives + 1) {
+                    while (cand_rows.size() < want) {
                         std::size_t j = ud(rng);
                         if (chunks[j].id == pair.pos_id) {
                             continue;
@@ -507,6 +513,9 @@ public:
         write_f32(out, bigram_weight_);
         write_u32(out, static_cast<std::uint32_t>(vocab_.size()));
         for (const auto& w : vocab_) {
+            if (w.size() > 65535) {
+                throw std::runtime_error("ContrastiveModel::save: token too long");
+            }
             write_u16(out, static_cast<std::uint16_t>(w.size()));
             out.write(w.data(), static_cast<std::streamsize>(w.size()));
             const float* row = emb_.data() + static_cast<std::size_t>(token_to_id_.at(w)) * dim_;
@@ -515,6 +524,10 @@ public:
         }
         write_buf(out, ngram_emb_);
         write_buf(out, bigram_emb_);
+        out.flush();
+        if (!out) {
+            throw std::runtime_error("ContrastiveModel::save: write failed");
+        }
     }
 
     static ContrastiveModel load(const std::string& path) {

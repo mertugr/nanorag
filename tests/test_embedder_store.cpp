@@ -336,6 +336,46 @@ int main() {
         std::cout << "hashing paraphrase recall@1: " << hits << "/6 (expected <6)\n";
     }
 
+    // --- Sampled negatives terminate on a corpus smaller than max_negatives+1 ---
+    {
+        nanorag::ChunkStore tiny;
+        tiny.add({0, "a", "cats purr when they are content"});
+        tiny.add({1, "b", "dogs bark at strangers near the fence"});
+        tiny.add({2, "c", "water boils at one hundred degrees celsius"});
+        std::vector<nanorag::TrainPair> pairs = {{"which pet purrs", 0}, {"which pet barks", 1}};
+        nanorag::ContrastiveTrainConfig cfg;
+        cfg.dim = 16;
+        cfg.epochs = 2;
+        cfg.seed = 3;
+        cfg.full_doc_softmax = false;  // sampled-negatives path
+        cfg.max_negatives = 32;        // > corpus size: used to loop forever
+        auto m = nanorag::ContrastiveModel::train(tiny, pairs, cfg);
+        CHECK(m.dim() == 16);
+        std::cout << "sampled-negatives small-corpus training terminated\n";
+    }
+
+    // --- save rejects tokens longer than the u16 length prefix ---
+    {
+        nanorag::ChunkStore tiny;
+        tiny.add({0, "a", std::string(70000, 'x')});  // one 70k-char token
+        std::vector<nanorag::TrainPair> pairs = {{"find the long token", 0}};
+        nanorag::ContrastiveTrainConfig cfg;
+        cfg.dim = 8;
+        cfg.epochs = 1;
+        cfg.seed = 3;
+        auto m = nanorag::ContrastiveModel::train(tiny, pairs, cfg);
+        const auto dir = fs::temp_directory_path() / "nanorag_longtok_test";
+        fs::create_directories(dir);
+        bool threw = false;
+        try {
+            m.save((dir / "model.nctr").string());
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        CHECK(threw);
+        std::cout << "save rejected >64KB token (no silent corruption)\n";
+    }
+
     if (g_fails) {
         std::cerr << g_fails << " failure(s)\n";
         return 1;
