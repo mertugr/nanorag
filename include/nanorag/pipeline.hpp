@@ -370,35 +370,70 @@ public:
     }
 
     /// Retrieve with current HybridConfig (dense / sparse / hybrid).
+    ///
+    /// Answerability consumes cosine-scale scores only. Sparse BM25 scores are
+    /// marked non-cosine. Hybrid fusion ranks with BM25 boosts, then remaps every
+    /// returned hit to dense cosine (dense pool values, or embedder re-score for
+    /// sparse-only injects) so inject/fusion magnitudes cannot unlock the
+    /// paraphrase path (issues #15, #11, #14).
     RetrieveResult retrieve(const std::string& query, std::size_t k) const {
         const std::size_t pool =
             std::max(k, std::max(hybrid_.candidate_pool, static_cast<std::size_t>(1)));
         std::vector<tinyann::SearchResult> hits;
+        bool scores_are_cosine = true;
         if (hybrid_.mode == RetrieveMode::Dense) {
             hits = search_dense(query, k);
         } else if (hybrid_.mode == RetrieveMode::Sparse) {
             hits = search_sparse(query, k);
+            scores_are_cosine = false;  // raw BM25 — not cosine
         } else {
             auto dense = search_dense(query, pool);
             auto sparse = search_sparse(query, pool);
             const float sparse_max = sparse_.max_score(query);
             hits = fuse_dense_sparse(dense, sparse, hybrid_, k, sparse_max, &sparse_, &query);
-            // Report dense cosine (when available) as the score used by the answerability
-            // gate. Hybrid fusion is only for *ranking*; inflating scores with BM25 made
-            // weak dense hits pass min_score_without_query_support and broke OOD refuse.
+            // Report dense cosine as the score used by the answerability gate.
+            // Hybrid fusion is only for *ranking*; BM25-boosted / inject fusion
+            // scores must not reach min_score_without_query_support.
             std::unordered_map<std::int64_t, float> dense_score;
             for (const auto& h : dense) {
                 dense_score[h.id] = h.score;
             }
+            // Re-score sparse-only injects (and any non-dense fusion hits) with the
+            // same embedder used for ANN so the gate sees true cosine.
+            std::vector<float> qvec;
+            bool have_q = false;
             for (auto& h : hits) {
                 auto it = dense_score.find(h.id);
                 if (it != dense_score.end()) {
                     h.score = it->second;
+                    continue;
                 }
+                if (!have_q) {
+                    qvec = embedder_->embed(query);
+                    have_q = true;
+                }
+                if (!store_.contains(h.id)) {
+                    h.score = 0.f;
+                    continue;
+                }
+                const auto dvec = embedder_->embed(store_.get(h.id).text);
+                h.score = static_cast<float>(cosine(qvec, dvec));
             }
+            // Keep ranking consistent with the scores the gate will see.
+            std::sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) {
+                if (a.score != b.score) {
+                    return a.score > b.score;
+                }
+                return a.id < b.id;
+            });
         }
         RetrieveResult r;
         r.chunks = hits_to_chunks(hits, store_);
+        if (!scores_are_cosine) {
+            for (auto& c : r.chunks) {
+                c.score_is_cosine = false;
+            }
+        }
         r.prompt = build_rag_prompt(query, r.chunks);
         return r;
     }

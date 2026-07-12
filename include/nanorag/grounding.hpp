@@ -176,12 +176,18 @@ inline double query_support_in_passage(const std::string& query, const std::stri
 }
 
 /// Per-passage answerability (blocks near-misses like alcohol/ethanol→water).
+///
+/// Score floors and the high-score paraphrase path apply only when
+/// `h.score_is_cosine` is true. BM25 / fusion ranking scores are multi-unit and
+/// must not be compared to cosine thresholds (see issues #15, #11, #14).
 inline bool passage_is_answerable(const std::string& query, const RetrievedChunk& h,
                                   const GroundingConfig& cfg) {
     if (is_no_evidence_chunk(h)) {
         return false;
     }
-    if (h.score < cfg.min_score) {
+    // Cosine-scale floors only. Non-cosine (BM25/fusion) scores skip this check
+    // and must pass the lexical path without the paraphrase shortcut.
+    if (h.score_is_cosine && h.score < cfg.min_score) {
         return false;
     }
     const auto qtoks = content_tokens(query);
@@ -201,14 +207,14 @@ inline bool passage_is_answerable(const std::string& query, const RetrievedChunk
         qtoks.empty() ? 0.0 : static_cast<double>(hits) / static_cast<double>(qtoks.size());
 
     // If a long content token is missing, shared generics like "atmosphere" must not
-    // unlock the lexical path — only a strong embedding score may pass (paraphrase).
+    // unlock the lexical path — only a strong *cosine* score may pass (paraphrase).
     if (missing_distinctive) {
-        return h.score >= cfg.min_score_without_query_support;
+        return h.score_is_cosine && h.score >= cfg.min_score_without_query_support;
     }
     if (hits >= cfg.min_query_support_hits && qsup + 1e-12 >= cfg.min_query_support) {
         return true;
     }
-    return h.score >= cfg.min_score_without_query_support;
+    return h.score_is_cosine && h.score >= cfg.min_score_without_query_support;
 }
 
 /// Refuse when NO_EVIDENCE is ranked first and no real answerable passage exists.

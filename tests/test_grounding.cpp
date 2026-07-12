@@ -180,6 +180,99 @@ int main() {
         }
     }
 
+    // --- issue #15: BM25-scale scores must not unlock paraphrase path ---
+    {
+        nanorag::GroundingConfig cfg = nanorag::default_grounding_config();
+        const char* water =
+            "Under one atmosphere pure H2O becomes solid at 273.15 K and gas at 373.15 K.";
+        const char* q = "What is the boiling point of ethanol under one atmosphere?";
+        // score_is_cosine=false simulates --retrieve sparse (raw BM25).
+        nanorag::RetrievedChunk bm25_hit{30, 3.5f, "science", water, /*score_is_cosine=*/false};
+        CHECK(!nanorag::passage_is_answerable(q, bm25_hit, cfg));
+        auto ga = nanorag::answer_extractive_for_query(q, {bm25_hit}, cfg);
+        CHECK(ga.refused);
+        CHECK(ga.used.empty());
+        CHECK(ga.answer == std::string(nanorag::kDontKnowAnswer));
+    }
+
+    // --- issues #11/#14: fusion inject magnitude (~0.85×dense top) is not cosine ---
+    {
+        nanorag::GroundingConfig cfg = nanorag::default_grounding_config();
+        const char* water =
+            "Under one atmosphere pure H2O becomes solid at 273.15 K and gas at 373.15 K.";
+        const char* q = "What is the boiling point of ethanol under one atmosphere?";
+        // Pre-fix behavior: fusion inject score 0.75 with default score_is_cosine=true
+        // would incorrectly pass. After fix, non-cosine or low cosine refuses.
+        nanorag::RetrievedChunk inject_as_ranking{30, 0.75f, "science", water,
+                                                  /*score_is_cosine=*/false};
+        CHECK(!nanorag::passage_is_answerable(q, inject_as_ranking, cfg));
+        // True low cosine (what pipeline remaps injects to for near-miss topics).
+        nanorag::RetrievedChunk inject_cosine_low{30, 0.15f, "science", water,
+                                                  /*score_is_cosine=*/true};
+        CHECK(!nanorag::passage_is_answerable(q, inject_cosine_low, cfg));
+        // High real cosine still allows paraphrase path (by design).
+        nanorag::RetrievedChunk cosine_para{30, 0.92f, "science", water, true};
+        // ethanol missing → needs paraphrase score; 0.92 >= 0.60
+        CHECK(nanorag::passage_is_answerable(q, cosine_para, cfg));
+    }
+
+    // --- non-cosine scores can still pass via full lexical support ---
+    // Query terms must appear in the passage (no stemmer); avoid "water" vs "H2O".
+    {
+        nanorag::GroundingConfig cfg = nanorag::default_grounding_config();
+        const char* water =
+            "Under one atmosphere pure H2O becomes solid at 273.15 K and gas at 373.15 K.";
+        const char* q = "At one atmosphere when does pure H2O become gas?";
+        // "become" (len>=5) is missing vs "becomes" → missing_distinctive unless we
+        // only use tokens present in the passage.
+        const char* q_lex = "pure H2O becomes gas under one atmosphere";
+        nanorag::RetrievedChunk bm25_lex{30, 4.2f, "science", water, /*score_is_cosine=*/false};
+        CHECK(nanorag::passage_is_answerable(q_lex, bm25_lex, cfg));
+        auto ga = nanorag::answer_extractive_for_query(q_lex, {bm25_lex}, cfg);
+        CHECK(!ga.refused);
+        CHECK(!ga.used.empty());
+        CHECK(ga.used[0].id == 30);
+        // Near-miss with BM25 still refuses (ethanol missing + non-cosine).
+        (void)q;
+        nanorag::RetrievedChunk ood{30, 5.0f, "science", water, false};
+        CHECK(!nanorag::passage_is_answerable(
+            "What is the boiling point of ethanol under one atmosphere?", ood, cfg));
+    }
+
+    // --- sparse retrieve marks scores non-cosine (issue #15 end-to-end) ---
+    {
+        auto store = corpus();
+        std::vector<nanorag::TrainPair> pairs = {
+            {"At one atmosphere when does pure H2O become gas?", 30},
+            {"Which small companion mammal vibrates softly when relaxed?", 10},
+        };
+        nanorag::ContrastiveTrainConfig tcfg;
+        tcfg.dim = 32;
+        tcfg.epochs = 40;
+        tcfg.seed = 3;
+        tcfg.hard_neg_k = 0;
+        tcfg.query_query_weight = 0.0f;
+        auto ret = nanorag::Retriever::build_contrastive(store, pairs, tcfg);
+        ret.set_retrieve_mode(nanorag::RetrieveMode::Sparse);
+        nanorag::GroundingConfig gcfg = nanorag::default_grounding_config();
+        auto ga = ret.ask_grounded("What is the boiling point of ethanol under one atmosphere?", 5,
+                                   gcfg);
+        if (!ga.refused || !ga.used.empty()) {
+            std::cerr << "SPARSE OOD FAIL refused=" << ga.refused << " used=" << ga.used.size()
+                      << " answer=" << ga.answer << "\n";
+            for (const auto& u : ga.used) {
+                std::cerr << "  used id=" << u.id << " score=" << u.score
+                          << " cosine=" << u.score_is_cosine << "\n";
+            }
+            ++g_fails;
+        }
+        // Confirm retrieve marks non-cosine on sparse hits.
+        auto rr = ret.retrieve("atmosphere pure H2O gas", 3);
+        for (const auto& c : rr.chunks) {
+            CHECK(!c.score_is_cosine);
+        }
+    }
+
     // --- end-to-end: paraphrase ok, realistic near-miss refuse ---
     {
         auto store = corpus();
