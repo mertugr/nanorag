@@ -1,7 +1,7 @@
 # nanorag
 
 **Version:** `0.1.0` · **License:** MIT · **Stack:** [tinyann](https://github.com/mertugr/tinyann) ≥ 0.1.0 · [nanollm](https://github.com/mertugr/nanollm) ≥ 0.4.0  
-**Compatibility:** [COMPATIBILITY.md](COMPATIBILITY.md) (version matrix, formats, endianness)
+**Compatibility:** [COMPATIBILITY.md](COMPATIBILITY.md) · **Quality:** [QUALITY.md](QUALITY.md)
 
 Local **C++17 RAG** orchestrator over owned libraries:
 
