@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, phase1/**, phase0/**]
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -13,8 +13,11 @@ jobs:
       - name: Checkout (recursive submodules)
         uses: actions/checkout@v4
         with:
-          # Public submodules: tinyann + nanollm
+          # Private sibling repos (tinyann, nanollm) need a PAT with repo read.
+          # Secret CI_PAT: classic PAT or fine-grained token with access to mertugr/tinyann + nanollm.
+          # Falls back is not possible; GITHUB_TOKEN cannot clone other private repos.
           submodules: recursive
+          token: ${{ secrets.CI_PAT }}
 
       - name: Install toolchain
         run: |
