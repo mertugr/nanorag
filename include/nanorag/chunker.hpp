@@ -116,6 +116,34 @@ inline bool is_sentence_end(char c) {
     return c == '.' || c == '!' || c == '?';
 }
 
+inline bool is_ascii_digit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+/// True when '.' is a decimal point inside a number (e.g. 375.15, 3.14159), not EOS.
+/// Also covers multi-dot numerics like 1.2.3 (each internal '.' has digit neighbors).
+inline bool is_decimal_dot(const std::string& text, std::size_t i) {
+    if (i >= text.size() || text[i] != '.') {
+        return false;
+    }
+    if (i == 0 || i + 1 >= text.size()) {
+        return false;
+    }
+    return is_ascii_digit(text[i - 1]) && is_ascii_digit(text[i + 1]);
+}
+
+/// True when the terminator at i should open a new sentence (not decimal/abbrev noise).
+inline bool is_sentence_boundary(const std::string& text, std::size_t i) {
+    if (i >= text.size() || !is_sentence_end(text[i])) {
+        return false;
+    }
+    // Decimal points in floats/versions: "375.15 K", "v1.2.3"
+    if (text[i] == '.' && is_decimal_dot(text, i)) {
+        return false;
+    }
+    return true;
+}
+
 /// Byte offset of the UTF-8 sequence start at or before pos (skips continuation bytes),
 /// so substr boundaries never split a multi-byte codepoint.
 inline std::size_t utf8_floor(const std::string& s, std::size_t pos) {
@@ -126,12 +154,13 @@ inline std::size_t utf8_floor(const std::string& s, std::size_t pos) {
 }
 
 /// Split into sentences (keeps trailing punctuation on the sentence).
+/// Does not split on decimal points inside numbers (e.g. 373.15 stays intact).
 inline std::vector<std::string> split_sentences(const std::string& text) {
     std::vector<std::string> out;
     std::string cur;
     for (std::size_t i = 0; i < text.size(); ++i) {
         cur.push_back(text[i]);
-        if (is_sentence_end(text[i])) {
+        if (is_sentence_boundary(text, i)) {
             // include following quotes/parens
             while (i + 1 < text.size() &&
                    (text[i + 1] == '"' || text[i + 1] == '\'' || text[i + 1] == ')' ||

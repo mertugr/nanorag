@@ -106,6 +106,45 @@ int main() {
         }
     }
 
+    // sentence split must not break float numbers at '.' (e.g. 375.15 K)
+    {
+        using namespace nanorag::chunker_detail;
+        auto sents = split_sentences(
+            "Water boils at 373.15 K under one atmosphere. Ice melts at 273.15 K.");
+        CHECK(sents.size() == 2);
+        CHECK(sents[0] == "Water boils at 373.15 K under one atmosphere.");
+        CHECK(sents[1] == "Ice melts at 273.15 K.");
+        // Must not produce orphan fragments like "375." / "15 K."
+        for (const auto& s : sents) {
+            CHECK(s != "15 K.");
+            CHECK(s != "373.");
+            CHECK(s != "273.");
+        }
+
+        // Multi-dot numeric / version-like tokens stay in one sentence
+        auto vers = split_sentences("Use model v1.2.3 for export. Next step starts here.");
+        CHECK(vers.size() == 2);
+        CHECK(vers[0].find("v1.2.3") != std::string::npos);
+
+        // End-of-sentence after a float still splits: "at 373.15. Next"
+        auto edge = split_sentences("Boils at 373.15. Next fact continues.");
+        CHECK(edge.size() == 2);
+        CHECK(edge[0] == "Boils at 373.15.");
+        CHECK(edge[1] == "Next fact continues.");
+
+        // Full sentence strategy packs without splitting the float across chunks
+        ChunkerConfig cfg;
+        cfg.strategy = ChunkStrategy::Sentence;
+        cfg.max_chars = 200;
+        cfg.overlap_chars = 0;
+        cfg.min_chars = 5;
+        const std::string text =
+            "Under one atmosphere, pure H2O transitions from liquid to gas at 373.15 K.";
+        auto chunks = chunk_text(text, cfg);
+        CHECK(chunks.size() == 1);
+        CHECK(chunks[0].text.find("373.15 K") != std::string::npos);
+    }
+
     // markdown sections
     {
         ChunkerConfig cfg;

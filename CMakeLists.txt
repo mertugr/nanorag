@@ -57,9 +57,12 @@ target_compile_features(nanorag INTERFACE cxx_std_17)
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+# OpenSSL for HTTPS serve (optional path: --http skips TLS)
+find_package(OpenSSL REQUIRED)
+
 if(NANORAG_BUILD_CLI)
   add_executable(nanorag_cli src/main.cpp)
-  target_link_libraries(nanorag_cli PRIVATE nanorag)
+  target_link_libraries(nanorag_cli PRIVATE nanorag OpenSSL::SSL OpenSSL::Crypto)
   set_target_properties(nanorag_cli PROPERTIES OUTPUT_NAME nanorag)
   if(NOT MSVC)
     target_compile_options(nanorag_cli PRIVATE -Wall -Wextra -Wpedantic)

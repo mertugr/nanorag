@@ -6,6 +6,8 @@
 #include "nanorag/embedder.hpp"
 #include "nanorag/eval.hpp"
 #include "nanorag/generate_chat.hpp"
+#include "nanorag/https_server.hpp"
+#include "nanorag/rag_service.hpp"
 #include "nanorag/grounding.hpp"
 #include "nanorag/hybrid.hpp"
 #include "nanorag/pipeline.hpp"
@@ -26,6 +28,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -57,7 +60,12 @@ void usage(const char* argv0) {
         << "  " << argv0 << " eval-grounding --index <dir> --pairs <eval.tsv>\n"
         << "         [--ood-query <text>]... [--min-score F] [--retrieve dense|sparse|hybrid]\n"
         << "  " << argv0 << " eval-suite --data data/demo [--no-ablations]\n"
-        << "         [--retrieve dense|sparse|hybrid]  (default hybrid; report includes A/B)\n";
+        << "         [--retrieve dense|sparse|hybrid]  (default hybrid; report includes A/B)\n"
+        << "  " << argv0 << " serve --index <dir> [--host 127.0.0.1] [--port 8443]\n"
+        << "         [--cert cert.pem --key key.pem] [--http]  (HTTPS default; --http = plain)\n"
+        << "         [--k N] [--min-score F] [--retrieve dense|sparse|hybrid]\n"
+        << "         [--mode extractive|generate] [--model ... --tokenizer ...]\n"
+        << "         generate: same chat flags as ask; loads index+model once\n";
 }
 
 std::string require_arg(int& i, int argc, char** argv, const char* flag) {
@@ -494,6 +502,56 @@ int cmd_chunk(const std::string& input_path, const std::string& out_path,
     return 0;
 }
 
+
+int ensure_self_signed_certs(const std::string& cert, const std::string& key) {
+    if (fs::exists(cert) && fs::exists(key)) {
+        return 0;
+    }
+    fs::path cert_p(cert);
+    if (cert_p.has_parent_path() && !cert_p.parent_path().empty()) {
+        fs::create_directories(cert_p.parent_path());
+    }
+    // Generate a local self-signed cert for development HTTPS.
+    const std::string cmd =
+        "openssl req -x509 -newkey rsa:2048 -nodes "
+        "-keyout '" +
+        key + "' -out '" + cert +
+        "' -days 365 -subj '/CN=localhost' >/dev/null 2>&1";
+    const int rc = std::system(cmd.c_str());
+    if (rc != 0 || !fs::exists(cert) || !fs::exists(key)) {
+        throw std::runtime_error(
+            "failed to create self-signed TLS certs via openssl; pass --cert/--key or --http");
+    }
+    std::cerr << "generated self-signed TLS cert: " << cert << " key: " << key << "\n";
+    return 0;
+}
+
+int cmd_serve(nanorag::ServeConfig scfg, nanorag::HttpsServerConfig hcfg) {
+    // Load index (and optional LLM MultiSeqSession) once before accepting traffic.
+    std::cerr << "loading index once from " << scfg.index_dir << " ...\n" << std::flush;
+    nanorag::RagService service(scfg);
+    std::cerr << "index ready: real_chunks=" << service.retriever().real_size()
+              << " store_rows=" << service.retriever().size()
+              << " embedder=" << service.retriever().embedder().id()
+              << " mode=" << scfg.mode
+              << " llm=" << (service.has_llm() ? "yes(MultiSeqSession)" : "no") << "\n"
+              << std::flush;
+
+    if (!hcfg.plain_http) {
+        if (hcfg.cert_path.empty()) {
+            hcfg.cert_path = "certs/server.crt";
+        }
+        if (hcfg.key_path.empty()) {
+            hcfg.key_path = "certs/server.key";
+        }
+        ensure_self_signed_certs(hcfg.cert_path, hcfg.key_path);
+    }
+
+    nanorag::HttpsServer server(service, hcfg);
+    server.run();
+    return 0;
+}
+
 int cmd_eval_suite(const std::string& data_root, bool ablations,
                    nanorag::RetrieveMode retrieve_mode) {
     auto paths = nanorag::eval::default_demo_paths(data_root);
@@ -744,6 +802,72 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("eval-grounding requires --index");
             }
             return cmd_eval_grounding(index, pairs, oods, min_score, retrieve_mode);
+        }
+
+        if (cmd == "serve") {
+            nanorag::ServeConfig scfg;
+            nanorag::HttpsServerConfig hcfg;
+            for (int i = 2; i < argc; ++i) {
+                const std::string a = argv[i];
+                if (a == "--index") {
+                    scfg.index_dir = require_arg(i, argc, argv, "--index");
+                } else if (a == "--host") {
+                    hcfg.host = require_arg(i, argc, argv, "--host");
+                } else if (a == "--port") {
+                    hcfg.port = std::stoi(require_arg(i, argc, argv, "--port"));
+                } else if (a == "--cert") {
+                    hcfg.cert_path = require_arg(i, argc, argv, "--cert");
+                } else if (a == "--key") {
+                    hcfg.key_path = require_arg(i, argc, argv, "--key");
+                } else if (a == "--http") {
+                    hcfg.plain_http = true;
+                } else if (a == "--k") {
+                    scfg.default_k =
+                        static_cast<std::size_t>(std::stoull(require_arg(i, argc, argv, "--k")));
+                } else if (a == "--min-score") {
+                    scfg.min_score = std::stof(require_arg(i, argc, argv, "--min-score"));
+                } else if (a == "--retrieve") {
+                    scfg.retrieve_mode =
+                        nanorag::parse_retrieve_mode(require_arg(i, argc, argv, "--retrieve"));
+                } else if (a == "--mode") {
+                    scfg.mode = require_arg(i, argc, argv, "--mode");
+                } else if (a == "--model") {
+                    scfg.model_path = require_arg(i, argc, argv, "--model");
+                    if (scfg.mode == "extractive") {
+                        scfg.mode = "generate";
+                    }
+                } else if (a == "--tokenizer") {
+                    scfg.tokenizer_path = require_arg(i, argc, argv, "--tokenizer");
+                } else if (a == "--max-tokens") {
+                    scfg.max_tokens = std::stoi(require_arg(i, argc, argv, "--max-tokens"));
+                } else if (a == "--meta") {
+                    scfg.gen_opts.meta_path = require_arg(i, argc, argv, "--meta");
+                } else if (a == "--chat-family") {
+                    scfg.gen_opts.chat_family = require_arg(i, argc, argv, "--chat-family");
+                } else if (a == "--system") {
+                    scfg.gen_opts.system_extra = require_arg(i, argc, argv, "--system");
+                } else if (a == "--use-model-system") {
+                    scfg.gen_opts.use_model_default_system = true;
+                } else if (a == "--allow-approx-chat") {
+                    scfg.gen_opts.allow_approx_chat = true;
+                } else if (a == "--no-bos") {
+                    scfg.gen_opts.force_no_bos = true;
+                } else if (a == "--bos") {
+                    scfg.gen_opts.force_bos = true;
+                } else if (a == "--temperature") {
+                    scfg.gen_opts.temperature =
+                        std::stof(require_arg(i, argc, argv, "--temperature"));
+                } else if (a == "--n-seqs") {
+                    scfg.n_seqs = static_cast<nanollm::index_t>(
+                        std::stoll(require_arg(i, argc, argv, "--n-seqs")));
+                } else {
+                    throw std::runtime_error("unknown arg: " + a);
+                }
+            }
+            if (scfg.index_dir.empty()) {
+                throw std::runtime_error("serve requires --index");
+            }
+            return cmd_serve(scfg, hcfg);
         }
         usage(argv[0]);
         return 2;
