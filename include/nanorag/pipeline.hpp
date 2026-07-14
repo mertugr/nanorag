@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -468,6 +469,97 @@ public:
         return answer_extractive_for_query(query, r.chunks, *embedder_, gcfg);
     }
 
+    /// Next free non-negative chunk id (1 + max existing non-negative id, or 0).
+    std::int64_t next_chunk_id() const {
+        std::int64_t mx = -1;
+        for (auto id : store_.ids()) {
+            if (id >= 0 && id > mx) {
+                mx = id;
+            }
+        }
+        return mx + 1;
+    }
+
+    /// Incremental ingest: append chunks with the **frozen** embedder (no retrain).
+    ///
+    /// Embeds each new text, inserts into the HNSW graph (`tinyann::HnswIndex::add`),
+    /// updates the chunk store, and rebuilds the BM25 inverted index. Does **not**
+    /// re-train contrastive / word2vec weights — use full `ingest` for that.
+    ///
+    /// Id policy:
+    ///   - `renumber=true` (default): assign sequential ids starting at `next_chunk_id()`,
+    ///     ignoring input ids (except system NO_EVIDENCE which is never accepted here).
+    ///   - `renumber=false`: keep each chunk's id; fail closed on conflict or negative ids.
+    ///
+    /// Returns the assigned ids (same order as `chunks`). Empty input is a no-op.
+    std::vector<std::int64_t> add_chunks(std::vector<Chunk> chunks, bool renumber = true) {
+        if (chunks.empty()) {
+            return {};
+        }
+        std::vector<std::int64_t> assigned;
+        assigned.reserve(chunks.size());
+        std::int64_t next_id = next_chunk_id();
+
+        // Validate first so a partial failure never leaves store/index diverged.
+        for (const auto& c : chunks) {
+            if (c.text.empty()) {
+                throw std::invalid_argument("add_chunks: empty chunk text is not allowed");
+            }
+            if (c.id == kNoEvidenceId || c.id < 0) {
+                throw std::invalid_argument(
+                    "add_chunks: negative / NO_EVIDENCE ids cannot be added incrementally "
+                    "(sentinel is created only by full contrastive ingest)");
+            }
+            if (!renumber) {
+                if (store_.contains(c.id)) {
+                    throw std::invalid_argument("add_chunks: id already exists: " +
+                                                std::to_string(c.id));
+                }
+                if (index_.contains(c.id)) {
+                    throw std::invalid_argument("add_chunks: id already in HNSW: " +
+                                                std::to_string(c.id));
+                }
+            }
+        }
+        // Within-batch uniqueness when keeping ids.
+        if (!renumber) {
+            std::unordered_set<std::int64_t> seen;
+            for (const auto& c : chunks) {
+                if (!seen.insert(c.id).second) {
+                    throw std::invalid_argument("add_chunks: duplicate id in batch: " +
+                                                std::to_string(c.id));
+                }
+            }
+        }
+
+        for (auto& c : chunks) {
+            if (renumber) {
+                c.id = next_id++;
+            }
+            // Embed before mutating store so a bad embedder throw leaves index consistent.
+            const auto vec = embedder_->embed(c.text);
+            if (vec.size() != embedder_->dim()) {
+                throw std::runtime_error("add_chunks: embedder returned wrong dim");
+            }
+            store_.add(c);
+            index_.add(c.id, vec);
+            assigned.push_back(c.id);
+        }
+        rebuild_sparse();
+        return assigned;
+    }
+
+    /// Open index, append chunks, save in place (or to `out_dir` if non-empty).
+    static std::vector<std::int64_t> add_to_index(const std::string& index_dir,
+                                                  std::vector<Chunk> chunks, bool renumber = true,
+                                                  const std::string& out_dir = {}) {
+        auto ret = open(index_dir);
+        auto ids = ret.add_chunks(std::move(chunks), renumber);
+        const std::string dest = out_dir.empty() ? index_dir : out_dir;
+        ret.save(dest);
+        return ids;
+    }
+
     void save(const std::string& dir) const {
         store_.save(dir + "/chunks.tsv");
         index_.save(dir + "/vectors.hnsw.tann");
@@ -523,8 +615,12 @@ public:
     const SparseBm25Index& sparse_index() const { return sparse_; }
     std::size_t size() const { return store_.size(); }
     std::size_t real_size() const { return count_real_chunks(store_); }
+    /// Dense ANN vector count (must match store size after a successful add/load).
+    std::size_t index_size() const { return index_.size(); }
 
 private:
+    void rebuild_sparse() { sparse_ = SparseBm25Index(store_); }
+
     std::shared_ptr<Embedder> embedder_;
     ChunkStore store_;
     tinyann::HnswIndex index_;

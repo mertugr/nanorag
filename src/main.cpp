@@ -48,6 +48,10 @@ void usage(const char* argv0) {
         << "  " << argv0 << " ingest --chunks <tsv> --out <dir>\n"
         << "         [--embedder contrastive|word2vec|hashing]\n"
         << "         [--pairs <train_pairs.tsv>] [--dim N] [--epochs N]\n"
+        << "  " << argv0 << " add --index <dir> (--chunks <tsv> | --input <file|dir> | --text TXT)\n"
+        << "         [--out <dir>]  (default: write back to --index)\n"
+        << "         [--keep-ids]   (fail on id conflict; default renumbers)\n"
+        << "         chunk opts with --input: [--strategy ...] [--max-chars N] ...\n"
         << "  " << argv0 << " ask --index <dir> --query <text> [--k N]\n"
         << "         [--retrieve dense|sparse|hybrid]  (default hybrid)\n"
         << "         [--min-score F] [--mode extractive|generate]\n"
@@ -552,6 +556,70 @@ int cmd_serve(nanorag::ServeConfig scfg, nanorag::HttpsServerConfig hcfg) {
     return 0;
 }
 
+
+int cmd_add(const std::string& index_dir, const std::string& chunks_path,
+            const std::string& input_path, const std::string& text, const std::string& out_dir,
+            bool keep_ids, const nanorag::ChunkerConfig& chunk_cfg) {
+    const int sources =
+        (!chunks_path.empty() ? 1 : 0) + (!input_path.empty() ? 1 : 0) + (!text.empty() ? 1 : 0);
+    if (sources != 1) {
+        throw std::runtime_error("add requires exactly one of --chunks, --input, or --text");
+    }
+
+    std::vector<nanorag::Chunk> new_chunks;
+    if (!chunks_path.empty()) {
+        auto store = nanorag::ChunkStore::load(chunks_path);
+        new_chunks = store.all();
+        // Drop accidental NO_EVIDENCE rows from user TSV (sentinel stays from original ingest).
+        new_chunks.erase(std::remove_if(new_chunks.begin(), new_chunks.end(),
+                                        [](const nanorag::Chunk& c) {
+                                            return c.id == nanorag::kNoEvidenceId || c.id < 0;
+                                        }),
+                         new_chunks.end());
+    } else if (!input_path.empty()) {
+        nanorag::ChunkerConfig cfg = chunk_cfg;
+        // start_id ignored when renumbering; when keep-ids, honor chunker start_id.
+        new_chunks = nanorag::chunk_path(input_path, cfg);
+    } else {
+        nanorag::Chunk c;
+        c.id = 0;
+        c.source = chunk_cfg.source.empty() ? "add" : chunk_cfg.source;
+        c.text = nanorag::sanitize_chunk_text(text);
+        if (c.text.empty()) {
+            throw std::runtime_error("add --text produced empty chunk after sanitize");
+        }
+        new_chunks.push_back(std::move(c));
+    }
+    if (new_chunks.empty()) {
+        throw std::runtime_error("add: no chunks to append");
+    }
+
+    const std::size_t n_in = new_chunks.size();
+    std::cerr << "add: loading index " << index_dir << " ...\n" << std::flush;
+    auto ret = nanorag::Retriever::open(index_dir);
+    const std::size_t before = ret.real_size();
+    const bool renumber = !keep_ids;
+    auto ids = ret.add_chunks(std::move(new_chunks), renumber);
+    const std::string dest = out_dir.empty() ? index_dir : out_dir;
+    if (!out_dir.empty()) {
+        fs::create_directories(out_dir);
+    }
+    ret.save(dest);
+    std::cout << "add: appended " << ids.size() << " chunk(s) (input=" << n_in << ")\n"
+              << "  real_chunks " << before << " → " << ret.real_size()
+              << "  store_rows=" << ret.size() << "  hnsw=" << ret.index_size() << "\n"
+              << "  embedder=" << ret.embedder().id() << " (frozen, no retrain)\n"
+              << "  ids:";
+    for (std::size_t i = 0; i < ids.size() && i < 16; ++i) {
+        std::cout << " " << ids[i];
+    }
+    if (ids.size() > 16) {
+        std::cout << " ... +" << (ids.size() - 16) << " more";
+    }
+    std::cout << "\n  saved → " << dest << "\n";
+    return 0;
+}
+
 int cmd_eval_suite(const std::string& data_root, bool ablations,
                    nanorag::RetrieveMode retrieve_mode) {
     auto paths = nanorag::eval::default_demo_paths(data_root);
@@ -868,6 +936,51 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("serve requires --index");
             }
             return cmd_serve(scfg, hcfg);
+        }
+
+        if (cmd == "add") {
+            std::string index, chunks, input, text, out;
+            bool keep_ids = false;
+            nanorag::ChunkerConfig chunk_cfg;
+            chunk_cfg.source = "add";
+            for (int i = 2; i < argc; ++i) {
+                const std::string a = argv[i];
+                if (a == "--index") {
+                    index = require_arg(i, argc, argv, "--index");
+                } else if (a == "--chunks") {
+                    chunks = require_arg(i, argc, argv, "--chunks");
+                } else if (a == "--input" || a == "-i") {
+                    input = require_arg(i, argc, argv, "--input");
+                } else if (a == "--text") {
+                    text = require_arg(i, argc, argv, "--text");
+                } else if (a == "--out") {
+                    out = require_arg(i, argc, argv, "--out");
+                } else if (a == "--keep-ids") {
+                    keep_ids = true;
+                } else if (a == "--source") {
+                    chunk_cfg.source = require_arg(i, argc, argv, "--source");
+                } else if (a == "--strategy") {
+                    chunk_cfg.strategy =
+                        nanorag::parse_chunk_strategy(require_arg(i, argc, argv, "--strategy"));
+                } else if (a == "--max-chars") {
+                    chunk_cfg.max_chars = static_cast<std::size_t>(
+                        std::stoull(require_arg(i, argc, argv, "--max-chars")));
+                } else if (a == "--overlap") {
+                    chunk_cfg.overlap_chars = static_cast<std::size_t>(
+                        std::stoull(require_arg(i, argc, argv, "--overlap")));
+                } else if (a == "--min-chars") {
+                    chunk_cfg.min_chars = static_cast<std::size_t>(
+                        std::stoull(require_arg(i, argc, argv, "--min-chars")));
+                } else if (a == "--start-id") {
+                    chunk_cfg.start_id = std::stoll(require_arg(i, argc, argv, "--start-id"));
+                } else {
+                    throw std::runtime_error("unknown arg: " + a);
+                }
+            }
+            if (index.empty()) {
+                throw std::runtime_error("add requires --index");
+            }
+            return cmd_add(index, chunks, input, text, out, keep_ids, chunk_cfg);
         }
         usage(argv[0]);
         return 2;

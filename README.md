@@ -117,6 +117,13 @@ See [COMPATIBILITY.md](COMPATIBILITY.md) for version matrix and format versions.
   --out index/demo \
   --embedder contrastive --dim 64 --epochs 200
 
+# Incremental: append docs without retrain / full rebuild (frozen embedder + HNSW add + BM25 rebuild)
+./build/nanorag add --index index/demo --chunks more_chunks.tsv
+./build/nanorag add --index index/demo --input docs/new.md --strategy markdown
+./build/nanorag add --index index/demo --text "A new passage to index."
+# Keep TSV ids (fails on conflict): --keep-ids
+# Write a copy instead of updating in place: --out index/demo2
+
 ./build/nanorag ask --index index/demo -q "…" [--min-score 0.25] [--retrieve hybrid]
 # Generate mode is chat-aware (meta chat_family, stops, add_bos):
 ./build/nanorag ask --index index/demo -q "…" --mode generate \
@@ -209,7 +216,8 @@ See `data/demo/eval/README.md`.
 - Bag-of-words mean embeddings — not a large dual encoder
 - Quality needs good train pairs and near-miss OOD pairs
 - **Host-endian** binary formats (`*.tann`, `.nctr`, `.nw2v`) — same machine endianness required (no endian marker)
-- Single-threaded; no server yet
+- Single-threaded serve (one request at a time)
+- Incremental `add` freezes the embedder (no contrastive retrain); OOD quality for new domains still benefits from full `ingest`
 - Honest hard retrieval is still weak (see eval hard R@k) — not production dual-encoder quality
 
 ---
@@ -220,7 +228,8 @@ See `data/demo/eval/README.md`.
 2. **Phase 1** — hybrid submodules + install/export, CI, VERSION, LICENSE (**done** / Milestone 0 hygiene)
 3. **Phase 2** — eval foundation: labeled sets, R@k/MRR, refuse, grounding, ablations
 4. **Phase 2+** — hybrid dense+BM25 retrieval (**this**); stronger embedders next
-5. **Later** — generate/chat parity with nanollm, incremental index, HTTP serve
+5. **Later** — generate/chat parity with nanollm; stronger embedders  
+   *(incremental index + HTTP serve: available via `add` / `serve`)*
 
 ## License
 

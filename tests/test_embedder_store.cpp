@@ -435,6 +435,102 @@ int main() {
         std::cout << "ChunkStore reserves id -1 for NO_EVIDENCE sentinel (issue #16)\n";
     }
 
+    // --- incremental add: frozen embedder, no full retrain ---
+    {
+        nanorag::ChunkStore store = neutral_corpus();
+        // Hashing is deterministic / train-free — ideal for incremental tests.
+        auto emb = std::make_shared<nanorag::HashingEmbedder>(/*dim=*/64);
+        auto ret = nanorag::Retriever::build(emb, store);
+        const std::size_t n0 = ret.real_size();
+        CHECK(n0 == 6);
+        CHECK(ret.index_size() == ret.size());
+
+        // Append two new documents; ids renumbered past max existing.
+        std::vector<nanorag::Chunk> extra = {
+            {99, "extra",
+             "Mercury is a silvery liquid metal at room temperature used in older thermometers."},
+            {100, "extra",
+             "Graphite is a soft crystalline form of carbon used in pencil cores and lubricants."},
+        };
+        auto ids = ret.add_chunks(extra, /*renumber=*/true);
+        CHECK(ids.size() == 2);
+        CHECK(ids[0] == 6);
+        CHECK(ids[1] == 7);
+        CHECK(ret.real_size() == n0 + 2);
+        CHECK(ret.index_size() == ret.size());
+        CHECK(ret.store().contains(6));
+        CHECK(ret.store().get(6).text.find("Mercury") != std::string::npos);
+
+        // Dense retrieval should surface the new chunk for a keyword-aligned query.
+        auto hits = ret.search_dense("silvery liquid metal mercury thermometer", 3);
+        CHECK(!hits.empty());
+        bool found_mercury = false;
+        for (const auto& h : hits) {
+            if (h.id == 6) {
+                found_mercury = true;
+            }
+        }
+        CHECK(found_mercury);
+
+        // Sparse BM25 also sees the new doc after rebuild.
+        auto sparse = ret.search_sparse("graphite pencil cores carbon", 3);
+        CHECK(!sparse.empty());
+        bool found_graphite = false;
+        for (const auto& h : sparse) {
+            if (h.id == 7) {
+                found_graphite = true;
+            }
+        }
+        CHECK(found_graphite);
+
+        // keep-ids conflict fails closed
+        bool threw = false;
+        try {
+            ret.add_chunks({{6, "x", "duplicate id must fail"}}, /*renumber=*/false);
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        CHECK(threw);
+
+        // keep-ids with free id works
+        auto ids2 = ret.add_chunks(
+            {{42, "extra", "Titanium dioxide is a white pigment used in paints and sunscreens."}},
+            /*renumber=*/false);
+        CHECK(ids2.size() == 1);
+        CHECK(ids2[0] == 42);
+        CHECK(ret.store().contains(42));
+
+        // Persist and reload — incremental state survives.
+        const auto dir = fs::temp_directory_path() / "nanorag_incremental_add";
+        fs::create_directories(dir);
+        ret.save(dir.string());
+        auto reloaded = nanorag::Retriever::open(dir.string());
+        CHECK(reloaded.real_size() == ret.real_size());
+        CHECK(reloaded.index_size() == reloaded.size());
+        CHECK(reloaded.store().contains(6));
+        CHECK(reloaded.store().contains(42));
+        auto hits2 = reloaded.search_dense("silvery liquid metal mercury thermometer", 3);
+        bool found_after_load = false;
+        for (const auto& h : hits2) {
+            if (h.id == 6) {
+                found_after_load = true;
+            }
+        }
+        CHECK(found_after_load);
+
+        // Reject NO_EVIDENCE incremental add
+        threw = false;
+        try {
+            reloaded.add_chunks({{nanorag::kNoEvidenceId, "system", nanorag::kNoEvidenceText}},
+                                /*renumber=*/false);
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        CHECK(threw);
+
+        std::cout << "incremental add (frozen embedder + HNSW + BM25 + save/load) OK\n";
+    }
+
     if (g_fails) {
         std::cerr << g_fails << " failure(s)\n";
         return 1;
