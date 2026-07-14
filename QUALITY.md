@@ -142,6 +142,43 @@ Hard-climb spreadsheet (historical): `results/hard_climb_results.xlsx`.
 
 ---
 
+## Notes
+
+### HTTPS serve (load-once index)
+
+`nanorag serve` is an HTTPS service layer over the same grounded pipeline as CLI `ask`:
+
+- **Index is loaded once** at process start (`Retriever::open`); not re-ingested or reloaded per request.
+- **`POST /ask`** body: JSON `{"query":"...","k":N}` (optional `k`, default from `--k`).
+- **Response** is JSON with `answer`, structured **`citations`** (id / score / source / text), `grounding`, `used`, and `candidates` — not free-text-only dumps.
+- **`GET /health`** reports mode, index path, chunk counts, and whether an LLM is loaded.
+- Optional **`--mode generate`** loads the model once and uses nanollm **`MultiSeqSession`** for decode; extractive remains the quality-safe default (same refuse/citation gates).
+- TLS via OpenSSL (`--cert` / `--key`, or auto self-signed under `certs/`); plain HTTP with `--http`.
+
+Example:
+
+```bash
+./build/nanorag serve --index index/demo --host 127.0.0.1 --port 8443 --mode extractive
+curl -sk https://127.0.0.1:8443/health
+curl -sk -X POST https://127.0.0.1:8443/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"At one atmosphere when does pure water become gas?","k":5}'
+```
+
+Serve does **not** change retrieval/grounding metrics; it only exposes the existing extractive (or generate) path over the network.
+
+### Chunker: sentence strategy and decimal points
+
+Sentence splitting used to treat every `.` as end-of-sentence, so floats were broken incorrectly, e.g. `373.15 K` → `"373."` / `"15 K."`.
+
+**Fix:** a `.` is not a sentence boundary when both neighbors are ASCII digits (covers floats and multi-dot tokens like `v1.2.3`). Real EOS after a number still works (`Boils at 373.15. Next…`).
+
+Coverage: `tests/test_chunker.cpp` (float / version / trailing-period cases). Markdown strategy packs via the same sentence splitter, so it inherits the fix.
+
+Re-chunk any corpus built with `--strategy sentence` (or markdown) if existing TSVs were produced before the fix.
+
+---
+
 ## Related docs
 
 - [COMPATIBILITY.md](COMPATIBILITY.md) — versions and formats  
